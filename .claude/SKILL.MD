@@ -60,6 +60,122 @@ preparation moves `develop` into `main`.
 
 ---
 
+## The Loop: Branch → Done → Review → Merge
+
+Work proceeds in **loops**. One loop is one unit of change: a feature, a fix, a
+refactor. Every loop follows the same four gates, in order, with no step
+skipped and no step reordered. These are requirements, not suggestions.
+
+```
+     ┌─ 1. BRANCH ──────────────────────────────────────────┐
+     │  cut feature/<name> from develop                      │
+     └───────────────────────────┬───────────────────────────┘
+                                 ▼
+     ┌─ 2. DONE ────────────────────────────────────────────┐
+     │  every test layer passes; CI green on the branch      │
+     └───────────────────────────┬───────────────────────────┘
+                                 ▼
+     ┌─ 3. REVIEW ──────────────────────────────────────────┐
+     │  merge request, evaluated by a DIFFERENT agent        │
+     └───────────────────────────┬───────────────────────────┘
+                                 ▼
+     ┌─ 4. MERGE ───────────────────────────────────────────┐
+     │  only on approval → CI tags the version → release     │
+     └───────────────────────────────────────────────────────┘
+```
+
+### Gate 1 — One branch per loop
+
+A new loop MUST begin with a new feature branch cut from current `develop`.
+Feature branches are short-lived and single-purpose: one loop, one branch, one
+merge request. Do not continue a finished loop's branch into the next loop,
+and do not accumulate unrelated changes on one branch — a reviewer cannot
+meaningfully approve a branch that does three things.
+
+### Gate 2 — Definition of Done
+
+A loop is **done** when the tests pass. Concretely, all of these MUST be true
+before a merge request is opened:
+
+| Check | Command | Proves |
+| --- | --- | --- |
+| Unit + envtest | `make test` | Reconcile logic and the generated CRD schema |
+| Integration | `make test-integration` | Real cluster behaviour end to end |
+| Lint | `make lint` | No new correctness or style violations |
+| Generated code current | `make manifests generate helm-crds` leaves no diff | Committed CRDs match the Go types |
+| CI green | GitHub Actions on the pushed branch | It passes somewhere other than your machine |
+
+"Tests pass" means you ran them and read the output. A loop is not done
+because the change looks right, because it compiled, or because the tests were
+passing before you started. Green locally but red in CI is **not done**.
+
+If any check cannot pass for a defensible reason, say so explicitly in the
+merge request. Do not open one claiming done when it is not.
+
+### Gate 3 — Independent agent review
+
+Every merge into `develop` MUST go through a merge request. Every merge from
+`develop` into `main` MUST go through a merge request. There are no direct
+merges and no exceptions for small changes.
+
+**The merge request MUST be evaluated by a different agent than the one that
+wrote the change.** This is the central rule of this gate.
+
+An agent reviewing its own work is not review. It re-derives the same
+assumptions that produced the code, so the failure modes it missed while
+writing are exactly the ones it will miss while reading. Worse, it already
+believes the change is correct — it wrote it — so it reads to confirm rather
+than to falsify. A separate agent starts from the diff with no attachment to
+the approach and no memory of why a shortcut seemed reasonable at the time.
+
+The reviewing agent MUST:
+
+- Start from the **diff and the merge request description**, not from the
+  authoring conversation. A fresh context is the point; inheriting the
+  author's reasoning defeats it.
+- **Independently verify the Definition of Done** rather than trusting the
+  description. Run the tests. A merge request asserting "tests pass" is a
+  claim to check, not evidence.
+- Look for what the author could not see: unhandled error paths, missing test
+  coverage for the change, assumptions that hold only on the author's cluster,
+  breaking changes to the CRD schema, drift between RBAC markers and the chart.
+- Return an explicit verdict — **APPROVE**, or **REQUEST CHANGES** with
+  specific, actionable findings. "Looks good" is not a verdict.
+
+The authoring agent MUST NOT approve its own merge request, and MUST NOT
+merge on the strength of its own assessment.
+
+In Claude Code, spawn the reviewer as a subagent with its own context, or run
+the review in a separate session:
+
+```bash
+/code-review                       # reviews the current diff
+/code-review <pr-number>           # reviews a specific merge request
+gh pr create --base develop --fill # open the MR first
+```
+
+Blocking findings are fixed **on the same feature branch**, and the merge
+request is re-reviewed. A finding is not resolved by arguing it away in a
+comment; either change the code or explain in the merge request why the
+finding does not apply, and let the reviewer decide.
+
+### Gate 4 — Merge, tag, release
+
+Only an approved merge request may be merged. The merge is what authorises
+the version: merging into `develop` cuts the next MINOR, merging into `main`
+cuts the next MAJOR, and CI does the tagging (see below). Nothing is tagged
+or released that did not pass an independent review.
+
+### What never to do
+
+- **Never open a merge request before the Definition of Done is met.**
+- **Never review your own change.** If you wrote it, a different agent reviews it.
+- **Never merge an unreviewed or change-requested merge request.**
+- **Never merge directly into `develop` or `main`,** including fast-forward merges.
+- **Never tag or release a commit that did not come through an approved merge request.**
+
+---
+
 ## Versioning: MAJOR.MINOR
 
 Versions are `MAJOR.MINOR`. There is no patch component.
@@ -107,23 +223,26 @@ tag.
 ## Quick Start: Workflow Overview
 
 ```
-1. Feature branch cut from develop  (mandatory — never commit to develop)
+1. Feature branch cut from develop      (one loop, one branch)
    ↓
 2. Local development + local cluster testing
    ↓
-3. Unit & integration tests
+3. DEFINITION OF DONE: all test layers pass, CI green
    ↓
-4. Push feature branch (Actions validate; no version, no publish)
+4. Merge request opened against develop
    ↓
-5. Pull request reviewed and merged into develop
+5. REVIEW GATE: evaluated by a DIFFERENT agent than the author
+   ↓                              ↘ changes requested → back to 2
+6. Approved → merged into develop
    ↓
-6. Actions tag vMAJOR.(MINOR+1) and publish that image to Docker Hub
+7. Actions tag vMAJOR.(MINOR+1) and publish that image to Docker Hub
    ↓
-7. When the line is ready, merge develop into main
+8. When the line is ready: merge request from develop into main,
+   reviewed the same way
    ↓
-8. Actions tag v(MAJOR+1).0, publish the image, chart and GitHub release
+9. Actions tag v(MAJOR+1).0, publish the image, chart and GitHub release
    ↓
-9. Deploy to any cluster via Helm/OCI
+10. Deploy to any cluster via Helm/OCI
 ```
 
 ---
@@ -731,11 +850,22 @@ does **not** assign a version and does **not** publish an image — only
 
 ### Finishing a feature
 
-Open a pull request into `develop` and merge it once CI is green.
+Meet the Definition of Done first — all test layers green, CI green on the
+pushed branch. Only then open the merge request.
 
 ```bash
 gh pr create --base develop --fill
 ```
+
+Then hand it to a **different agent** for review. The author does not approve
+its own work:
+
+```bash
+/code-review <pr-number>
+```
+
+Merge only on APPROVE. If changes are requested, fix them on the same feature
+branch, push, and have the reviewer re-evaluate.
 
 The merge commit lands on `develop`, which:
 
@@ -745,15 +875,17 @@ The merge commit lands on `develop`, which:
 
 ### Promoting to main
 
-When a line of work is ready, merge `develop` into `main`. There is no
+When a line of work is ready, promote `develop` to `main` — through a merge
+request, reviewed by a separate agent, exactly like a feature. A promotion is
+a release; it gets *more* scrutiny than a feature, not less. There is no
 version to bump by hand and no release branch to prepare — CI computes the
 MAJOR.
 
 ```bash
-git checkout main
-git pull --ff-only
-git merge --no-ff develop
-git push origin main
+gh pr create --base main --head develop \
+  --title "Release: promote develop to main" --fill
+/code-review <pr-number>        # a different agent evaluates it
+# merge only on APPROVE
 ```
 
 That push tags `v2.0`, publishes `partofaplan/kado-operator:2.0` and moves
@@ -776,8 +908,12 @@ A production fix still goes through a branch, but branches from `main`:
 
 ```bash
 git checkout -b hotfix/nil-deref-on-delete main
-# fix, commit, PR into main
+# fix, meet the Definition of Done, open an MR into main,
+# have a separate agent review it, then merge
 ```
+
+Urgency does not waive the review gate. A hotfix is the change most likely to
+be written quickly and least likely to have been thought through.
 
 Merging it to `main` cuts the next MAJOR, because `main` only ever produces
 MAJOR versions. Merge `main` back into `develop` afterwards.
@@ -785,6 +921,7 @@ MAJOR versions. Merge `main` back into `develop` afterwards.
 ### What never to do
 
 - **Never commit directly to `develop` or `main`.**
+- **Never merge without an approved review from a different agent.**
 - **Never create a `v*` tag by hand.** CI derives the next version from the
   highest existing tag; a hand-made tag silently reassigns everything after it.
 - **Never delete or move a published tag.** Images are already pushed against
@@ -882,29 +1019,38 @@ When using Claude Code (or Claude in your IDE):
    - Generates test cases alongside code
    - Provides `make` commands to validate
 
-4. **Test locally**
+4. **Reach the Definition of Done**
    ```bash
-   make test                  # Unit tests — no cluster
+   make test                  # Unit + envtest — no cluster
+   make test-integration      # Against your current context
    make lint                  # Catch issues early
-   make install && make run   # Against your current context
+   make manifests generate helm-crds && git status --porcelain   # must be empty
    ```
+   Read the output. The loop is not done until every layer is green.
 
 5. **Iterate based on feedback**
-   - Push to feature branch
+   - Push the feature branch
    - GitHub Actions run automatically
    - Review action output (coverage, lint results)
-   - Make adjustments and push again
+   - Make adjustments and push again until CI is green
 
-6. **Merge to develop**
-   - Feature tests pass ✅
-   - Actions green ✅
-   - Merge the pull request into `develop`
+6. **Open the merge request and hand it off**
+   ```bash
+   gh pr create --base develop --fill
+   /code-review <pr-number>
+   ```
+   The review MUST come from a different agent than the one that wrote the
+   change. If you authored it, you do not approve it. Fix any blocking
+   findings on the same branch and have it re-reviewed.
+
+7. **Merge on approval**
+   - Merge the approved merge request into `develop`
    - CI cuts the next MINOR and publishes that image
 
-7. **Release when ready**
-   - Merge `develop` into `main`
-   - CI cuts the next MAJOR, publishes the image and chart, moves `latest`,
-     and creates the GitHub release
+8. **Release when ready**
+   - Open a merge request from `develop` into `main`, reviewed the same way
+   - On approval and merge, CI cuts the next MAJOR, publishes the image and
+     chart, moves `latest`, and creates the GitHub release
    - Merge `main` back into `develop`
 
 ---
@@ -913,7 +1059,11 @@ When using Claude Code (or Claude in your IDE):
 
 - **Test Coverage**: Aim for >80% on controllers
 - **Build Time**: Keep CI <10 min (critical for iteration speed)
-- **Time to Merge**: Feature branch → develop should be <1 day
+- **Time to Merge**: Feature branch → develop should be <1 day, review included
+- **Review Turnaround**: A merge request should be evaluated the same day it
+  opens — a slow review gate is the one people start routing around
+- **Unreviewed Merges**: Zero. Any merge without an approving review from a
+  separate agent is a process failure, whatever the change contained
 - **Release Cadence**: Target weekly or bi-weekly promotions of `develop` to `main`
 - **Portability**: Integration suite green on at least two distributions
 
@@ -966,6 +1116,15 @@ kubectl create secret docker-registry dockerhub \
 - Confirm the token has **Read/Write** scope and has not expired
 - Pull requests from forks cannot read secrets — those runs build without pushing, which is expected
 
+### A Merge Request Cannot Clear Review
+
+| Symptom | What it means |
+| --- | --- |
+| Reviewer cannot reproduce "tests pass" | The Definition of Done was asserted, not met. Run every layer and paste the output into the merge request. |
+| Reviewer keeps finding the same class of issue | The loop is too large. Split it: one loop, one concern. |
+| You are tempted to approve your own change | That is the rule working. Spawn a separate reviewing agent. |
+| Review is blocking an urgent fix | Urgency is not an exemption. A hotfix is the change most likely to be wrong. |
+
 ### Version Was Not Assigned, or Jumped
 
 ```bash
@@ -1015,8 +1174,9 @@ escaped into non-helper code.
 5. **Write first feature branch** (cut from `develop`) and test locally
 6. **Verify Actions run** on the PR, then confirm the merge to `develop` cuts
    a MINOR tag and publishes that image to Docker Hub
-7. **Protect `develop` and `main`** so the feature-branch rule is enforced by
-   the forge, not by discipline alone
+7. **Protect `develop` and `main`** so the feature-branch and review rules are
+   enforced by the forge, not by discipline alone — require a merge request,
+   require an approving review, and require CI to pass before merge
 8. **Document custom resources** in `docs/` folder
 9. **Set up Helm chart** for multi-cluster deployment
 10. **Run the integration suite on a second distribution** to prove portability
