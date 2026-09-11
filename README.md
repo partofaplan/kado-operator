@@ -1,7 +1,6 @@
 # kado-operator
 
 [![CI](https://github.com/partofaplan/kado-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/partofaplan/kado-operator/actions/workflows/ci.yml)
-[![Integration Tests](https://github.com/partofaplan/kado-operator/actions/workflows/integration-test.yml/badge.svg)](https://github.com/partofaplan/kado-operator/actions/workflows/integration-test.yml)
 [![Docker Image](https://img.shields.io/docker/v/partofaplan/kado-operator?label=docker&sort=semver)](https://hub.docker.com/r/partofaplan/kado-operator)
 
 A Kubernetes operator that provisions isolated development environments on

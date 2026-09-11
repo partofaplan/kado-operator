@@ -242,12 +242,14 @@ CI needs one repository secret, `DOCKERHUB_TOKEN`: a Docker Hub access token
 with Read/Write scope, never the account password. Create it at
 <https://hub.docker.com/settings/security>. The username is not a secret — it
 is the public `partofaplan` namespace already present in the image name — so
-it lives in the workflows as a plain `DOCKERHUB_USER` env var. Pull requests
-from forks cannot read secrets, so those runs build without pushing.
+it lives in the workflows as a plain `DOCKERHUB_USER` env var. Pull request
+runs never reach the publish job at all: `version` is gated on a push to
+`develop` or `main`, so a pull request is validated and nothing is tagged or
+published.
 
-Only the "Create ephemeral cluster" step of `integration-test.yml` is
-provider-specific. Swapping K3D for Kind, or for a kubeconfig secret pointing
-at a remote cluster, means editing that step and nothing else.
+Only the "Create ephemeral cluster" step of the `integration` job in `ci.yml`
+is provider-specific. Swapping K3D for Kind, or for a kubeconfig secret
+pointing at a remote cluster, means editing that step and nothing else.
 
 ## Adding a new API
 

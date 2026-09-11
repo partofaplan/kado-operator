@@ -6,11 +6,13 @@ on:
   pull_request:
     branches: [ develop, main ]
 
-# Cancel superseded PR runs, but never cancel a develop/main run: those assign
-# a version and publish, and a half-finished publish is worse than a slow queue.
+# Never cancel a develop/main run: those assign a version and publish, and a
+# half-finished publish is worse than a slow queue. Everything else — PRs and
+# feature branches — is cancellable, which matters now that every run spins up
+# a cluster for the integration job.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ !contains(fromJSON('["develop","main"]'), github.ref_name) }}
 
 env:
   IMAGE: docker.io/partofaplan/kado-operator

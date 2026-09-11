@@ -569,7 +569,7 @@ name: CI
 
 on:
   push:
-    branches: [ develop, main, 'feature/**', 'hotfix/**', 'release/**' ]
+    branches: [ develop, main, 'feature/**', 'hotfix/**' ]
   pull_request:
     branches: [ develop, main ]
 
