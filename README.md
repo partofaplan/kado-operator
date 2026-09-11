@@ -61,10 +61,13 @@ every version — never tag by hand.
 | Tag | Points at | Published by |
 | --- | --- | --- |
 | `latest` | the newest release | merge to `main` |
-| `2.0` | that release | merge to `main` |
+| `1.0` | that release | merge to `main` |
 | `0.1` | one development build | merge to `develop` |
 | `develop` / `main` | the tip of that branch | every merge to it |
 | `sha-<short>` | one exact commit, never moves | every merge |
+
+Published so far: `develop`, `0.1` and `sha-*`. The `latest`, `main` and
+release-version rows appear with the first promotion of `develop` to `main`.
 
 `MAJOR` here means *released*, not *breaking* — it marks the promotion of
 `develop` into `main`. Breaking changes are called out in the release notes,
