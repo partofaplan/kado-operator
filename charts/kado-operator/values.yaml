@@ -1,0 +1,82 @@
+image:
+  repository: ghcr.io/partofaplan/kado-operator
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+# Install the DevEnvironment CRD with the chart. Set to false when the CRD is
+# managed separately (GitOps, or a shared cluster where a platform team owns
+# CRDs) — Helm does not upgrade CRDs placed in crds/, so this chart templates
+# it instead to keep upgrades working.
+installCRDs: true
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+rbac:
+  # The operator creates namespaces and workloads across the cluster, so it
+  # needs a ClusterRole. Narrow this only if you also restrict which namespaces
+  # it reconciles.
+  create: true
+
+# Restrict the operator to a comma-separated list of namespaces to watch for
+# DevEnvironment resources. Empty means cluster-wide.
+watchNamespaces: ""
+
+metrics:
+  # Serve metrics over HTTPS with authn/authz on the manager's secure port.
+  enabled: true
+  port: 8443
+  service:
+    type: ClusterIP
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs to be present.
+    enabled: false
+    interval: 30s
+    labels: {}
+
+leaderElection:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Probe tuning for the manager's health endpoints.
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10

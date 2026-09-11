@@ -1,0 +1,49 @@
+apiVersion: devenv.aviture.dev/v1alpha1
+kind: DevEnvironment
+metadata:
+  name: team-alpha
+  namespace: default
+spec:
+  # Provisioned namespace. Defaults to metadata.name when omitted.
+  namespaceName: team-alpha
+  owner: team-alpha
+
+  # Shared volume mounted by any service that sets mountPath.
+  storage:
+    size: 1Gi
+    accessModes:
+      - ReadWriteOnce
+
+  # Injected into every service via envFrom.
+  config:
+    LOG_LEVEL: debug
+    ENVIRONMENT: development
+
+  services:
+    - name: postgres
+      image: postgres:16-alpine
+      port: 5432
+      env:
+        POSTGRES_USER: dev
+        POSTGRES_PASSWORD: dev
+        POSTGRES_DB: appdb
+        PGDATA: /var/lib/postgresql/data/pgdata
+      mountPath: /var/lib/postgresql/data
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+
+    - name: redis
+      image: redis:7-alpine
+      port: 6379
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi

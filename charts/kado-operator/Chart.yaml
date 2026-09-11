@@ -1,0 +1,15 @@
+apiVersion: v2
+name: kado-operator
+version: 0.1.0
+appVersion: "0.1.0"
+description: Operator for provisioning dev environments in Kubernetes
+type: application
+keywords:
+  - operator
+  - development
+  - environments
+home: https://github.com/partofaplan/kado-operator
+sources:
+  - https://github.com/partofaplan/kado-operator
+maintainers:
+  - name: partofaplan

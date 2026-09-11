@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Build, push and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the changelog can diff against the previous tag
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A tag that cannot pass its own tests must not become a release.
+      - name: Run tests
+        run: make test
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/partofaplan/kado-operator:${{ github.ref_name }}
+            ghcr.io/partofaplan/kado-operator:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build install manifest
+        run: make build-installer IMG=ghcr.io/partofaplan/kado-operator:${{ github.ref_name }}
+
+      - name: Package and push Helm chart
+        run: |
+          VERSION="${{ github.ref_name }}"
+          helm package charts/kado-operator \
+            --version "${VERSION#v}" \
+            --app-version "${VERSION}" \
+            --destination dist/
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+          helm push "dist/kado-operator-${VERSION#v}.tgz" oci://ghcr.io/partofaplan/charts
+
+      - name: Generate release notes
+        run: |
+          VERSION="${{ github.ref_name }}"
+          PREV=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || true)
+          {
+            echo "# kado-operator ${VERSION}"
+            echo
+            echo "## Install"
+            echo '```bash'
+            echo "helm install kado-operator oci://ghcr.io/partofaplan/charts/kado-operator \\"
+            echo "  --version ${VERSION#v} --namespace kado-operator-system --create-namespace"
+            echo '```'
+            echo
+            echo "Or apply the bundled manifest:"
+            echo '```bash'
+            echo "kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/install.yaml"
+            echo '```'
+            echo
+            echo "## Container image"
+            echo '```'
+            echo "ghcr.io/partofaplan/kado-operator:${VERSION}"
+            echo '```'
+            echo
+            echo "## Changes"
+            if [ -n "$PREV" ]; then
+              git log --pretty='- %s (%h)' "${PREV}..${VERSION}"
+            else
+              git log --pretty='- %s (%h)' "${VERSION}"
+            fi
+          } > RELEASE.md
+          cat RELEASE.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE.md
+          files: |
+            dist/install.yaml
+            dist/kado-operator-*.tgz
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') }}

@@ -1,0 +1,31 @@
+kado-operator {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+Check that the manager is running:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "kado-operator.fullname" . }}
+
+Create your first environment:
+
+  cat <<'YAML' | kubectl apply -f -
+  apiVersion: devenv.aviture.dev/v1alpha1
+  kind: DevEnvironment
+  metadata:
+    name: my-env
+    namespace: default
+  spec:
+    owner: {{ .Release.Name }}
+    services:
+      - name: redis
+        image: redis:7-alpine
+        port: 6379
+  YAML
+
+Then watch it provision:
+
+  kubectl get devenvironments -w
+  kubectl get all -n my-env
+{{- if not .Values.installCRDs }}
+
+NOTE: installCRDs is false, so the DevEnvironment CRD was not installed by this
+chart. Apply it separately before creating any DevEnvironment resources.
+{{- end }}
