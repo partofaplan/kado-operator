@@ -61,19 +61,22 @@ every version — never tag by hand.
 | Tag | Points at | Published by |
 | --- | --- | --- |
 | `latest` | the newest release | merge to `main` |
-| `2.0` | that release | merge to `main` |
-| `1.5` | one development build | merge to `develop` |
+| `1.0` | that release | merge to `main` |
+| `0.1` | one development build | merge to `develop` |
 | `develop` / `main` | the tip of that branch | every merge to it |
 | `sha-<short>` | one exact commit, never moves | every merge |
+
+Published so far: `develop`, `0.1` and `sha-*`. The `latest`, `main` and
+release-version rows appear with the first promotion of `develop` to `main`.
 
 `MAJOR` here means *released*, not *breaking* — it marks the promotion of
 `develop` into `main`. Breaking changes are called out in the release notes,
 because the version number will not signal them.
 
 ```bash
-docker pull partofaplan/kado-operator:latest    # newest release
 docker pull partofaplan/kado-operator:develop   # newest development build
-docker pull partofaplan/kado-operator:1.5       # one specific build
+docker pull partofaplan/kado-operator:0.1       # one specific build
+docker pull partofaplan/kado-operator:latest    # newest release (once one exists)
 ```
 
 For anything reproducible — a pinned deployment, a bug report, a rollback —
@@ -81,6 +84,11 @@ use `sha-<short>` or a digest rather than a moving tag. Each CI run prints the
 digest it published in its job summary.
 
 ## Install
+
+> **Before the first release.** `latest`, the published chart and
+> `install.yaml` are all produced by promoting `develop` to `main`, which has
+> not happened yet. Until it does, install from a checkout — the two commands
+> under *from a checkout* below work today.
 
 ```bash
 helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \
@@ -108,7 +116,8 @@ image tag defaults to the chart's `appVersion`. The DevEnvironment CRD is
 installed with the chart by default; set `installCRDs=false` where a platform
 team owns CRDs separately.
 
-Prefer plain manifests? Each release attaches a rendered `install.yaml`:
+Prefer plain manifests? Each release attaches a rendered `install.yaml`
+(available once the first release is cut):
 
 ```bash
 kubectl apply -f https://github.com/partofaplan/kado-operator/releases/latest/download/install.yaml
