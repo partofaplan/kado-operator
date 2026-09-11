@@ -139,6 +139,15 @@ helm upgrade --install kado-operator ./charts/kado-operator \
   --set image.tag=dev
 ```
 
+### Image builds
+
+The Dockerfile's builder stage is pinned to `--platform=$BUILDPLATFORM` and
+cross-compiles via `GOARCH`. A multi-arch build therefore runs the Go
+toolchain natively once per target instead of emulating a foreign toolchain
+under QEMU — the difference between roughly a minute and many. Keep that
+pragma if you edit the Dockerfile; `make docker-buildx` and both publishing
+workflows depend on it.
+
 RBAC comes from two places that must agree: the `+kubebuilder:rbac` markers on
 the reconciler (which generate `config/rbac/role.yaml`) and the ClusterRole in
 `charts/kado-operator/templates/rbac.yaml`. Adding a permission means updating
@@ -160,13 +169,21 @@ as `docker.io/partofaplan/kado-operator`:
 | Trigger | Tags |
 | --- | --- |
 | push to a branch | `<branch>` (moving) and `sha-<short>` (immutable) |
-| tag `v*` | `vX.Y.Z` and `latest`, multi-arch (amd64 + arm64) |
+| tag `v1.2.3` | `1.2.3`, `1.2`, `1`, and `latest` |
+| tag `v1.2.3-rc1` | `1.2.3-rc1` only — a prerelease never moves `latest` |
 
-Pin `sha-<short>` when you need the exact build you tested. CI needs two
-repository secrets, `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` — the latter a
-Docker Hub access token with Read/Write scope, never the account password.
-Pull requests from forks cannot read secrets, so those runs build without
-pushing.
+Every image is built for `linux/amd64` and `linux/arm64`.
+
+`latest` deliberately tracks the newest *release*, not the tip of a branch, so
+`docker pull ...:latest` cannot hand someone unreleased work. Use `develop`
+for the newest merged work, and `sha-<short>` or a digest whenever the build
+must be reproducible — a pinned deployment, a bug report, a rollback. Each CI
+run prints the digest it published in its job summary.
+
+CI needs two repository secrets, `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` —
+the latter a Docker Hub access token with Read/Write scope, never the account
+password. Pull requests from forks cannot read secrets, so those runs build
+without pushing.
 
 Only the "Create ephemeral cluster" step of `integration-test.yml` is
 provider-specific. Swapping K3D for Kind, or for a kubeconfig secret pointing

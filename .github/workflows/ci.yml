@@ -83,12 +83,20 @@ jobs:
           name: coverage
           path: cover.out
 
-  build:
-    name: Build image
+  publish:
+    name: Build & publish image
     needs: [ lint, test, generated ]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+
+      # QEMU registers the binfmt handlers buildx needs to *probe* foreign
+      # platforms. The build itself still cross-compiles natively, because the
+      # Dockerfile pins its builder stage to $BUILDPLATFORM.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -102,9 +110,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Branch pushes get a moving tag plus an immutable sha tag, so any build
-      # you tested can be pinned exactly. Release tags are handled by
-      # release.yml, which also builds multi-arch.
+      # Branch pushes get a moving tag naming the branch, plus an immutable
+      # sha tag so any build you tested can be pinned exactly. `latest` is
+      # deliberately NOT set here — it belongs to released versions and is
+      # published by release.yml on a v* tag.
       - name: Derive image tags
         id: meta
         uses: docker/metadata-action@v5
@@ -114,13 +123,40 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
             type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=kado-operator
+            org.opencontainers.image.description=Operator for provisioning dev environments in Kubernetes
 
-      - name: Build and push operator image
+      - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ github.event_name == 'push' }}
+          # Multi-arch only when we publish. A pull request builds one
+          # architecture: it is faster feedback, and a multi-platform build
+          # with no exporter has no artifact to show for the extra minutes.
+          platforms: ${{ github.event_name == 'push' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Summarise published image
+        if: github.event_name == 'push'
+        run: |
+          {
+            echo "### Image published to Docker Hub"
+            echo
+            echo "Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo
+            echo "Tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "Pull the exact build this run tested:"
+            echo '```bash'
+            echo "docker pull ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -25,6 +25,13 @@ All notable changes to this project are documented here. The format follows
 - GitHub Actions for CI (lint, generated-file drift, tests, image build and
   push), integration tests on an ephemeral cluster, and tagged releases that
   publish a multi-arch image and the chart to Docker Hub under `partofaplan`.
+- Multi-arch (`linux/amd64`, `linux/arm64`) images on every push. Branch
+  pushes publish a moving branch tag plus an immutable `sha-<short>` tag;
+  releases publish semver tags (`1.2.3`, `1.2`, `1`) and move `latest`, which
+  prereleases never claim.
+- Dockerfile builder stage pinned to `$BUILDPLATFORM`, so multi-arch builds
+  cross-compile natively instead of emulating the toolchain under QEMU. This
+  removes the need for kubebuilder's generated `Dockerfile.cross` workaround.
 - Makefile targets that act on the current kubectl context
   (`test-integration`, `install`, `run`, `helm-crds`, `helm-lint`, `clean`),
   plus optional local-cluster helpers (`cluster-up`, `cluster-down`,

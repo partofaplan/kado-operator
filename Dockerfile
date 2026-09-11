@@ -1,5 +1,11 @@
-# Build the manager binary
-FROM golang:1.24 AS builder
+# Build the manager binary.
+#
+# The builder runs on the BUILD machine's native architecture and cross-compiles
+# to the target via GOARCH. Without --platform=$BUILDPLATFORM, a multi-arch
+# build would emulate the whole toolchain under QEMU for every foreign
+# architecture, which is dramatically slower for no benefit: the Go compiler
+# cross-compiles a static CGO-free binary natively.
+FROM --platform=$BUILDPLATFORM golang:1.24 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -16,11 +22,8 @@ COPY cmd/main.go cmd/main.go
 COPY api/ api/
 COPY internal/ internal/
 
-# Build
-# the GOARCH has no default value to allow the binary to be built according to the host where the command
-# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
-# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
-# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
+# Build. TARGETOS/TARGETARCH are supplied by buildx per target platform; they
+# fall back to the host's values for a plain `docker build`.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
 
 # Use distroless as minimal base image to package the manager binary

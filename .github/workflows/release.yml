@@ -42,15 +42,34 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # v1.2.3 publishes 1.2.3, 1.2 and 1, so consumers can track a patch line
+      # or a major line. `latest` moves only on a full release — the
+      # `latest=false` guard keeps a prerelease like v1.2.3-rc1 from claiming
+      # it, which would hand every `docker pull ...:latest` an unstable build.
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+          flavor: |
+            latest=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=kado-operator
+            org.opencontainers.image.description=Operator for provisioning dev environments in Kubernetes
+
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -90,6 +109,11 @@ jobs:
             echo "## Container image"
             echo '```'
             echo "${{ env.IMAGE }}:${VERSION}"
+            echo '```'
+            echo
+            echo "Pinned by digest:"
+            echo '```'
+            echo "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
             echo '```'
             echo
             echo "## Changes"
