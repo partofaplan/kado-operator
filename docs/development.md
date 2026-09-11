@@ -139,6 +139,30 @@ helm upgrade --install kado-operator ./charts/kado-operator \
   --set image.tag=dev
 ```
 
+### CRD ownership: `make install` vs the chart
+
+Two things can install the DevEnvironment CRD, and they do not share
+ownership. `make install` applies it with kustomize; the chart templates it
+(when `installCRDs=true`, the default) and stamps it with Helm's ownership
+metadata. If kustomize installed it first, `helm install` refuses with:
+
+```
+invalid ownership metadata; label validation error:
+missing key "app.kubernetes.io/managed-by": must be set to "Helm"
+```
+
+Pick one owner per cluster. To switch from the kustomize path to the chart:
+
+```bash
+make uninstall ignore-not-found=true   # drop the kustomize-owned CRD first
+helm install kado-operator ./charts/kado-operator ...
+```
+
+Deleting the CRD deletes every DevEnvironment with it, so check
+`kubectl get devenvironments -A` before you do this anywhere real. On a
+cluster where a platform team owns CRDs, install the chart with
+`installCRDs=false` and let them manage it.
+
 ### Image builds
 
 The Dockerfile's builder stage is pinned to `--platform=$BUILDPLATFORM` and

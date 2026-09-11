@@ -158,3 +158,4 @@ kubectl describe devenvironment team-alpha
 | `Degraded=True`, "reading source secret" | A name in `secretRefs` does not exist in the `DevEnvironment`'s own namespace. |
 | Stuck at `Provisioning` | Pods are not becoming ready. `kubectl get pods -n <env>` and check image pulls and resource requests. |
 | Stuck deleting | The namespace is still terminating, usually a finalizer on something inside it. `kubectl get ns <env> -o yaml`. |
+| `helm install` rejects the CRD as not Helm-owned | The CRD was installed by `make install` (kustomize). See [CRD ownership](development.md#crd-ownership-make-install-vs-the-chart). |
