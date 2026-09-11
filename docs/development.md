@@ -20,9 +20,24 @@ The repo follows Gitflow. `main` is always releasable; `develop` is the
 integration branch.
 
 ```
-feature/*  ──▶ develop ──▶ release/* ──▶ main (tagged)
-hotfix/*   ──────────────────────────▶ main
+feature/*  ──MR──▶ develop ──MR──▶ main
+hotfix/*   ────────────────MR──▶ main
 ```
+
+Every arrow is a merge request, and every merge request is reviewed by someone
+other than its author. Four gates, in order, no exceptions:
+
+1. **Branch** — one loop, one feature branch cut from current `develop`.
+2. **Done** — `make test`, `make test-integration` and `make lint` all pass,
+   regeneration leaves no diff, and CI is green on the pushed branch.
+3. **Review** — a merge request, evaluated by a different agent than the one
+   that wrote the change. The reviewer works from the diff, verifies the
+   Definition of Done independently rather than trusting it, and returns
+   APPROVE or REQUEST CHANGES.
+4. **Merge** — only on approval. The merge is what authorises the version.
+
+Nothing is tagged or released that did not come through an approved merge
+request. The full rules live in `.claude/SKILL.MD`.
 
 The `git flow` CLI is optional — plain git works the same way:
 
@@ -36,12 +51,16 @@ git checkout develop
 git merge --no-ff feature/my-change
 git branch -d feature/my-change
 
-# cut a release
-git checkout -b release/v0.2.0 develop
-# bump Chart.yaml version/appVersion, update CHANGELOG
-git checkout main && git merge --no-ff release/v0.2.0
-git tag -a v0.2.0 -m "v0.2.0"      # pushing the tag triggers the release workflow
-git checkout develop && git merge --no-ff release/v0.2.0
+# finish it: Definition of Done first, then a reviewed merge request
+gh pr create --base develop --fill
+/code-review <pr-number>          # a DIFFERENT agent evaluates it
+# merge only on APPROVE — the merge cuts the next MINOR
+
+# cut a release: promote develop to main, reviewed the same way
+gh pr create --base main --head develop --title "Release: promote develop to main" --fill
+# on approval and merge, CI cuts the next MAJOR and publishes everything
+
+# then bring main back into develop (this itself cuts MAJOR.1)
 ```
 
 ## The local loop
@@ -181,20 +200,30 @@ both; `make run` will not catch the difference because it uses your kubeconfig.
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `ci.yml` | push to `develop`/`main`/`release/*`/`feature/*`, PRs | lint, verify generated files are current, unit + envtest with coverage, build and push an iteration image |
+| `ci.yml` | pushes and PRs | lint, verify generated files are current, unit + envtest; on `develop`/`main` also assign the version, tag, publish the image, and on `main` publish the release |
 | `integration-test.yml` | push to `develop`/`main`/`release/*`, PRs | ephemeral cluster, install CRDs, build image, run the integration suite |
-| `release.yml` | tag `v*` | test, build and push a multi-arch image to Docker Hub, push the chart to the OCI registry, publish a GitHub release |
+
+There is deliberately no tag-triggered release workflow. Tags are pushed by
+`ci.yml` using `GITHUB_TOKEN`, and GitHub suppresses workflow triggers for
+such pushes to prevent loops — a workflow listening on `push: tags: v*` would
+look correct and never fire. Everything reacting to a new version therefore
+lives in the run that creates the tag.
 
 ### Container images
 
 Images publish to [Docker Hub](https://hub.docker.com/repositories/partofaplan)
 as `docker.io/partofaplan/kado-operator`:
 
-| Trigger | Tags |
-| --- | --- |
-| push to a branch | `<branch>` (moving) and `sha-<short>` (immutable) |
-| tag `v1.2.3` | `1.2.3`, `1.2`, `1`, and `latest` |
-| tag `v1.2.3-rc1` | `1.2.3-rc1` only — a prerelease never moves `latest` |
+| Trigger | Version | Image tags |
+| --- | --- | --- |
+| push to a feature branch | none assigned | none published |
+| merge into `develop` | MINOR increments (`v1.4` → `v1.5`) | `1.5`, `develop`, `sha-<short>` |
+| merge into `main` | MAJOR increments (`v1.5` → `v2.0`) | `2.0`, `main`, `sha-<short>`, `latest` |
+
+Versions come from the highest existing `v*` tag, so the tags are the source
+of truth — there is no VERSION file to drift. Never create a `v*` tag by
+hand: CI counts from the highest one it finds, so a hand-made tag silently
+reassigns every version after it.
 
 Every image is built for `linux/amd64` and `linux/arm64`.
 

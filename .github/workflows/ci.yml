@@ -6,10 +6,11 @@ on:
   pull_request:
     branches: [ develop, main ]
 
-# A new push to a branch makes the in-flight run for that branch obsolete.
+# Cancel superseded PR runs, but never cancel a develop/main run: those assign
+# a version and publish, and a half-finished publish is worse than a slow queue.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE: docker.io/partofaplan/kado-operator
@@ -85,17 +86,76 @@ jobs:
           name: coverage
           path: cover.out
 
-  publish:
-    name: Build & publish image
+  # Assigns MAJOR.MINOR from the highest existing tag. Only develop and main
+  # produce versions; feature branches are validated but never versioned.
+  version:
+    name: Assign version
     needs: [ lint, test, generated ]
+    if: github.event_name == 'push' && contains(fromJSON('["develop","main"]'), github.ref_name)
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
+    # Serialised and never cancelled: two runs computing "the next version"
+    # concurrently would race to push the same tag.
+    concurrency:
+      group: version-assign
+      cancel-in-progress: false
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      chart: ${{ steps.next.outputs.chart }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags are the source of truth; we need all of them
+
+      - name: Compute next version
+        id: next
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Match ONLY strict vMAJOR.MINOR. A glob like 'v[0-9]*.[0-9]*' would
+          # also match v1.2-rc1 or v1.2.3, and the arithmetic below would then
+          # expand a non-numeric minor into an empty version.
+          latest=$(git tag --list 'v*' --sort=-v:refname \
+                     | grep -E '^v[0-9]+\.[0-9]+$' | head -n1 || true)
+          latest=${latest:-v0.0}
+          ver=${latest#v}
+          major=${ver%%.*}
+          minor=${ver#*.}
+          case "$BRANCH" in
+            develop) next="${major}.$((minor + 1))" ;;   # MINOR on every dev build
+            main)    next="$((major + 1)).0" ;;          # MAJOR on promotion
+            *)       echo "::error::refusing to version branch $BRANCH"; exit 1 ;;
+          esac
+          [[ "$next" =~ ^[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::computed bad version '$next' from '$latest'"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/v${next}" >/dev/null; then
+            echo "::error::tag v${next} already exists"; exit 1
+          fi
+          echo "version=${next}" >> "$GITHUB_OUTPUT"
+          # Helm demands full SemVer2, so the chart carries an explicit patch.
+          echo "chart=${next}.0" >> "$GITHUB_OUTPUT"
+          echo "\`$latest\` → \`v${next}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tag the commit
+        run: |
+          set -euo pipefail
+          V="v${{ steps.next.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$V" -m "$V from ${{ github.ref_name }}"
+          git push origin "$V"
+
+  publish:
+    name: Build & publish image
+    needs: [ version ]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # QEMU registers the binfmt handlers buildx needs to *probe* foreign
-      # platforms. The build itself still cross-compiles natively, because the
+      # QEMU registers the binfmt handlers buildx needs to probe foreign
+      # platforms. The build still cross-compiles natively, because the
       # Dockerfile pins its builder stage to $BUILDPLATFORM.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -103,28 +163,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Only authenticate when we actually intend to push. Pull requests from
-      # forks cannot read secrets, so those runs build without pushing.
       - name: Log in to Docker Hub
-        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Branch pushes get a moving tag naming the branch, plus an immutable
-      # sha tag so any build you tested can be pinned exactly. `latest` is
-      # deliberately NOT set here — it belongs to released versions and is
-      # published by release.yml on a v* tag.
+      # The version tag is the durable one. The branch tag is a convenience
+      # pointer, the sha tag an immutable escape hatch. `latest` follows main.
       - name: Derive image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
           tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
             type=ref,event=branch
-            type=ref,event=pr
             type=sha,format=short
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
           labels: |
             org.opencontainers.image.title=kado-operator
             org.opencontainers.image.description=Operator for provisioning dev environments in Kubernetes
@@ -134,31 +190,60 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}
-          # Multi-arch only when we publish. A pull request builds one
-          # architecture: it is faster feedback, and a multi-platform build
-          # with no exporter has no artifact to show for the extra minutes.
-          platforms: ${{ github.event_name == 'push' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Summarise published image
-        if: github.event_name == 'push'
         run: |
           {
-            echo "### Image published to Docker Hub"
+            echo "### Published \`v${{ needs.version.outputs.version }}\`"
             echo
             echo "Digest: \`${{ steps.build.outputs.digest }}\`"
             echo
-            echo "Tags:"
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
-            echo
-            echo "Pull the exact build this run tested:"
-            echo '```bash'
-            echo "docker pull ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
-            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Only a promotion to main produces a release artifact set.
+  release:
+    name: Publish release
+    needs: [ version, publish ]
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Package and push Helm chart
+        env:
+          V: ${{ needs.version.outputs.version }}
+          CHART: ${{ needs.version.outputs.chart }}
+        run: |
+          set -euo pipefail
+          make helm-crds
+          helm package charts/kado-operator \
+            --version "$CHART" --app-version "v$V" --destination dist/
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
+            --username "${{ env.DOCKERHUB_USER }}" --password-stdin
+          helm push "dist/kado-operator-${CHART}.tgz" oci://registry-1.docker.io/partofaplan
+
+      - name: Build install manifest
+        run: make build-installer IMG=${{ env.IMAGE }}:${{ needs.version.outputs.version }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/install.yaml
+            dist/kado-operator-*.tgz

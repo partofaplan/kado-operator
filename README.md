@@ -55,19 +55,26 @@ Images are published to Docker Hub as
 [`partofaplan/kado-operator`](https://hub.docker.com/r/partofaplan/kado-operator),
 built for `linux/amd64` and `linux/arm64`.
 
+Versions are `MAJOR.MINOR`. Merging into `develop` increments MINOR; promoting
+`develop` to `main` increments MAJOR and resets MINOR to zero. CI assigns
+every version — never tag by hand.
+
 | Tag | Points at | Published by |
 | --- | --- | --- |
-| `latest` | the newest stable release | release of a `v*` tag |
-| `1.2.3`, `1.2`, `1` | that release, its patch line, its major line | release of a `v*` tag |
-| `develop` | the tip of `develop` — newest merged work | every push to `develop` |
-| `main` | the tip of `main` | every push to `main` |
-| `sha-<short>` | one exact commit, never moves | every branch push |
+| `latest` | the newest release | merge to `main` |
+| `2.0` | that release | merge to `main` |
+| `1.5` | one development build | merge to `develop` |
+| `develop` / `main` | the tip of that branch | every merge to it |
+| `sha-<short>` | one exact commit, never moves | every merge |
 
-Prereleases (`v1.2.3-rc1`) publish their version tags but never move `latest`.
+`MAJOR` here means *released*, not *breaking* — it marks the promotion of
+`develop` into `main`. Breaking changes are called out in the release notes,
+because the version number will not signal them.
 
 ```bash
 docker pull partofaplan/kado-operator:latest    # newest release
-docker pull partofaplan/kado-operator:develop   # newest merged work
+docker pull partofaplan/kado-operator:develop   # newest development build
+docker pull partofaplan/kado-operator:1.5       # one specific build
 ```
 
 For anything reproducible — a pinned deployment, a bug report, a rollback —
@@ -140,15 +147,15 @@ The Dockerfile cross-compiles: its builder stage is pinned to
 `$BUILDPLATFORM`, so a multi-arch build runs the Go toolchain natively once
 per target rather than emulating it under QEMU.
 
-Releases are cut by tagging `main`:
+Releases are not cut by hand. Merging an approved merge request from
+`develop` into `main` is the release: CI assigns the next MAJOR, tags the
+commit, publishes the multi-arch image and moves `latest`, pushes the chart to
+the OCI registry, and creates a GitHub release with `install.yaml` and the
+chart archive attached.
 
-```bash
-git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
-```
-
-That triggers the release workflow: run tests, push the multi-arch image and
-its semver tags, publish the chart to the OCI registry, and create a GitHub
-release with `install.yaml` and the chart archive attached.
+Every change reaches `develop` the same way — a feature branch, all test
+layers green, then a merge request reviewed by someone other than its author.
+See [the development workflow](docs/development.md) for the full set of gates.
 
 CI needs one repository secret, `DOCKERHUB_TOKEN`: a Docker Hub access token
 with Read/Write scope, never the account password. The username is not a
