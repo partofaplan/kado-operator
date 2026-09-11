@@ -1,5 +1,9 @@
-# Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+# Image coordinates. Images are published to Docker Hub under partofaplan:
+# https://hub.docker.com/repositories/partofaplan
+REGISTRY   ?= docker.io
+IMAGE_NAME ?= partofaplan/kado-operator
+IMAGE_TAG  ?= latest
+IMG        ?= $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -61,31 +65,68 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# K3D cluster used for local development and the integration suite.
-K3D_CLUSTER ?= picard
-K3D_CONTEXT ?= k3d-$(K3D_CLUSTER)
-
-.PHONY: k3d-up
-k3d-up: ## Create the local K3D cluster if it does not already exist.
-	@if k3d cluster list $(K3D_CLUSTER) >/dev/null 2>&1; then \
-		echo "K3D cluster '$(K3D_CLUSTER)' already exists."; \
-	else \
-		k3d cluster create $(K3D_CLUSTER) --kubeconfig-update-default; \
-	fi
-	kubectl config use-context $(K3D_CONTEXT)
-
-.PHONY: k3d-down
-k3d-down: ## Delete the local K3D cluster.
-	k3d cluster delete $(K3D_CLUSTER)
-
-.PHONY: k3d-load
-k3d-load: docker-build ## Build the operator image and load it into the K3D cluster.
-	k3d image load $(IMG) -c $(K3D_CLUSTER)
-
+# Integration tests act on whatever cluster the current kubectl context points
+# at, so the same suite validates a local cluster, a CI cluster, or a remote
+# one. Creating a cluster is a separate, optional concern (see cluster-* below).
 .PHONY: test-integration
-test-integration: manifests generate fmt vet k3d-up install ## Run integration tests against the K3D cluster.
-	go test -tags=integration ./test/integration/... -v -timeout 15m
-	@echo "Integration tests complete. Cluster left running for inspection (make k3d-down to remove)."
+test-integration: manifests generate fmt vet install ## Run integration tests against the current kubectl context.
+	@echo "Running integration tests against context: $$(kubectl config current-context)"
+	# -count=1 disables result caching: cluster state changes even when code does not.
+	go test -tags=integration ./test/integration/... -v -count=1 -timeout 15m
+
+# ---- Local cluster conveniences ----
+# Optional. Only for creating a throwaway cluster on your own machine; nothing
+# in the build, test or deploy path depends on these.
+# One of: k3d | kind | minikube
+LOCAL_PROVIDER ?= k3d
+LOCAL_CLUSTER  ?= kado-dev
+
+.PHONY: cluster-up
+cluster-up: ## Create a local cluster and select its context (LOCAL_PROVIDER=k3d|kind|minikube).
+ifeq ($(LOCAL_PROVIDER),k3d)
+	@k3d cluster list $(LOCAL_CLUSTER) >/dev/null 2>&1 \
+		|| k3d cluster create $(LOCAL_CLUSTER) --kubeconfig-update-default
+	kubectl config use-context k3d-$(LOCAL_CLUSTER)
+else ifeq ($(LOCAL_PROVIDER),kind)
+	@kind get clusters 2>/dev/null | grep -qx $(LOCAL_CLUSTER) \
+		|| kind create cluster --name $(LOCAL_CLUSTER)
+	kubectl config use-context kind-$(LOCAL_CLUSTER)
+else ifeq ($(LOCAL_PROVIDER),minikube)
+	minikube start -p $(LOCAL_CLUSTER)
+	kubectl config use-context $(LOCAL_CLUSTER)
+else
+	$(error Unknown LOCAL_PROVIDER "$(LOCAL_PROVIDER)". Use k3d, kind or minikube.)
+endif
+
+.PHONY: cluster-down
+cluster-down: ## Delete the local cluster.
+ifeq ($(LOCAL_PROVIDER),k3d)
+	k3d cluster delete $(LOCAL_CLUSTER)
+else ifeq ($(LOCAL_PROVIDER),kind)
+	kind delete cluster --name $(LOCAL_CLUSTER)
+else ifeq ($(LOCAL_PROVIDER),minikube)
+	minikube delete -p $(LOCAL_CLUSTER)
+else
+	$(error Unknown LOCAL_PROVIDER "$(LOCAL_PROVIDER)". Use k3d, kind or minikube.)
+endif
+
+# Side-load the image to skip a registry round trip. Local only — a real
+# cluster pulls from Docker Hub instead.
+.PHONY: cluster-load
+cluster-load: docker-build ## Build the image and side-load it into the local cluster.
+ifeq ($(LOCAL_PROVIDER),k3d)
+	k3d image load $(IMG) -c $(LOCAL_CLUSTER)
+else ifeq ($(LOCAL_PROVIDER),kind)
+	kind load docker-image $(IMG) --name $(LOCAL_CLUSTER)
+else ifeq ($(LOCAL_PROVIDER),minikube)
+	minikube image load $(IMG) -p $(LOCAL_CLUSTER)
+else
+	$(error Unknown LOCAL_PROVIDER "$(LOCAL_PROVIDER)". Use k3d, kind or minikube.)
+endif
+
+.PHONY: test-integration-local
+test-integration-local: cluster-up test-integration ## Create a local cluster, then run integration tests against it.
+	@echo "Integration tests complete. Cluster left running (make cluster-down to remove)."
 
 .PHONY: helm-crds
 helm-crds: manifests ## Sync generated CRDs into the Helm chart.

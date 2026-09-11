@@ -48,9 +48,12 @@ Services reach each other by name: `postgres:5432`, `redis:6379`.
 ## Install
 
 ```bash
-helm install kado-operator oci://ghcr.io/partofaplan/charts/kado-operator \
+helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \
   --namespace kado-operator-system --create-namespace
 ```
+
+Images are published to [Docker Hub](https://hub.docker.com/repositories/partofaplan)
+as `docker.io/partofaplan/kado-operator`.
 
 Or from a checkout:
 
@@ -66,15 +69,22 @@ DevEnvironment CRD is installed with the chart by default; set
 
 ## Try it locally
 
+The operator runs on any conformant cluster. Point kubectl at one — K3D, Kind,
+minikube, Docker Desktop or a remote cluster — and everything below works the
+same:
+
 ```bash
-make k3d-up       # create the K3D cluster
-make install      # install the CRD
-make run          # run the operator against it
+kubectl config current-context   # confirm the target
+make install                     # install the CRD
+make run                         # run the operator against it
 
 # in another terminal
 kubectl apply -f config/samples/devenv_v1alpha1_devenvironment.yaml
 kubectl get devenvironments -w
 ```
+
+If you need a throwaway local cluster, `make cluster-up` creates one
+(`LOCAL_PROVIDER=k3d|kind|minikube`, default `k3d`).
 
 ## Documentation
 
@@ -86,8 +96,9 @@ kubectl get devenvironments -w
 ## Testing
 
 ```bash
-make test              # unit + envtest, no cluster required
-make test-integration  # full lifecycle against K3D
+make test                    # unit + envtest, no cluster required
+make test-integration        # full lifecycle against the current kubectl context
+make test-integration-local  # ...or spin up a local cluster first
 make lint
 ```
 

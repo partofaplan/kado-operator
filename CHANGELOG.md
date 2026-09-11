@@ -22,10 +22,13 @@ All notable changes to this project are documented here. The format follows
 - Test suite across three layers: fake-client unit tests, envtest specs
   covering the generated CRD schema, and a K3D integration suite behind the
   `integration` build tag.
-- GitHub Actions for CI (lint, generated-file drift, tests, image build),
-  K3D integration tests, and tagged releases that publish a multi-arch image
-  and the chart to GHCR.
-- Makefile targets for the K3D loop: `k3d-up`, `k3d-down`, `k3d-load`,
-  `test-integration`, `helm-crds`, `helm-lint`, `clean`.
+- GitHub Actions for CI (lint, generated-file drift, tests, image build and
+  push), integration tests on an ephemeral cluster, and tagged releases that
+  publish a multi-arch image and the chart to Docker Hub under `partofaplan`.
+- Makefile targets that act on the current kubectl context
+  (`test-integration`, `install`, `run`, `helm-crds`, `helm-lint`, `clean`),
+  plus optional local-cluster helpers (`cluster-up`, `cluster-down`,
+  `cluster-load`, `test-integration-local`) selectable with
+  `LOCAL_PROVIDER=k3d|kind|minikube`.
 
 [Unreleased]: https://github.com/partofaplan/kado-operator/compare/main...develop

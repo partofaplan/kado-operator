@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/partofaplan/kado-operator
+  repository: docker.io/partofaplan/kado-operator
   # Defaults to the chart's appVersion when empty.
   tag: ""
   pullPolicy: IfNotPresent

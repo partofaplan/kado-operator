@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   integration:
-    name: K3D integration
+    name: Integration
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -23,24 +23,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Install k3d itself and let the Makefile create the cluster, so CI takes
-      # exactly the same path as `make test-integration` on a developer laptop.
-      - name: Install k3d
-        run: curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.7.4 bash
-
-      - name: Create K3D cluster
-        run: make k3d-up K3D_CLUSTER=kado-ci
-
-      # The suite runs the manager in-process, so the image is not needed for
-      # the tests themselves. Building and loading it still proves the
-      # Dockerfile works and that the image lands in the cluster.
-      - name: Build and load operator image
+      # --- Cluster provisioning: the ONLY provider-specific step. ---
+      # Swap this for Kind, minikube, or a kubeconfig secret pointing at a
+      # remote cluster. Every step below acts on the current kubectl context
+      # and is unaffected by the choice.
+      - name: Create ephemeral cluster
         run: |
-          make docker-build IMG=kado-operator:ci
-          k3d image load kado-operator:ci -c kado-ci
+          curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.7.4 bash
+          k3d cluster create ci --kubeconfig-update-default --wait
+      # --- End provider-specific section. ---
+
+      - name: Show target cluster
+        run: |
+          kubectl config current-context
+          kubectl get nodes
+
+      # The suite runs the manager in-process against the cluster, so the image
+      # is not needed for the tests themselves. Building it still proves the
+      # Dockerfile works.
+      - name: Build operator image
+        run: make docker-build IMAGE_TAG=ci
 
       - name: Run integration tests
-        run: make test-integration K3D_CLUSTER=kado-ci
+        run: make test-integration
 
       - name: Dump cluster state on failure
         if: failure()

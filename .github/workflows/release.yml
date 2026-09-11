@@ -5,13 +5,15 @@ on:
     tags:
       - 'v*'
 
+env:
+  IMAGE: docker.io/partofaplan/kado-operator
+
 jobs:
   release:
     name: Build, push and publish
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write
 
     steps:
       - uses: actions/checkout@v4
@@ -27,15 +29,18 @@ jobs:
       - name: Run tests
         run: make test
 
+      # Required for the linux/arm64 leg of the multi-arch build.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -44,24 +49,25 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/partofaplan/kado-operator:${{ github.ref_name }}
-            ghcr.io/partofaplan/kado-operator:latest
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Build install manifest
-        run: make build-installer IMG=ghcr.io/partofaplan/kado-operator:${{ github.ref_name }}
+        run: make build-installer IMG=${{ env.IMAGE }}:${{ github.ref_name }}
 
       - name: Package and push Helm chart
         run: |
           VERSION="${{ github.ref_name }}"
+          make helm-crds
           helm package charts/kado-operator \
             --version "${VERSION#v}" \
             --app-version "${VERSION}" \
             --destination dist/
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
-            --username "${{ github.actor }}" --password-stdin
-          helm push "dist/kado-operator-${VERSION#v}.tgz" oci://ghcr.io/partofaplan/charts
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
+            --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+          helm push "dist/kado-operator-${VERSION#v}.tgz" oci://registry-1.docker.io/partofaplan
 
       - name: Generate release notes
         run: |
@@ -72,7 +78,7 @@ jobs:
             echo
             echo "## Install"
             echo '```bash'
-            echo "helm install kado-operator oci://ghcr.io/partofaplan/charts/kado-operator \\"
+            echo "helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \\"
             echo "  --version ${VERSION#v} --namespace kado-operator-system --create-namespace"
             echo '```'
             echo
@@ -83,7 +89,7 @@ jobs:
             echo
             echo "## Container image"
             echo '```'
-            echo "ghcr.io/partofaplan/kado-operator:${VERSION}"
+            echo "${{ env.IMAGE }}:${VERSION}"
             echo '```'
             echo
             echo "## Changes"
