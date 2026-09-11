@@ -34,28 +34,222 @@ CI authenticates with a single `DOCKERHUB_TOKEN` repository secret (a Docker Hub
 
 ---
 
+## Core Principle: Branch Before You Change
+
+**Every change to the codebase starts on a feature branch cut from `develop`.**
+No exceptions, including one-line fixes, documentation edits and changes made
+by an AI assistant. `develop` and `main` are never committed to directly.
+
+```bash
+git checkout develop
+git pull --ff-only
+git checkout -b feature/<short-description>
+```
+
+Branch names describe the change, not the author or the tool:
+`feature/env-provisioner-crd`, `feature/pvc-resize`, `hotfix/nil-deref-on-delete`.
+
+Why this is a hard rule rather than a preference: every push to `develop`
+cuts a version and publishes an image (see below). A commit made directly to
+`develop` is therefore a release, made without review, that cannot be undone
+without burning a version number. The feature branch is where work is
+reviewable and abandonable.
+
+Work merges back through a pull request into `develop`. Only release
+preparation moves `develop` into `main`.
+
+---
+
+## The Loop: Branch → Done → Review → Merge
+
+Work proceeds in **loops**. One loop is one unit of change: a feature, a fix, a
+refactor. Every loop follows the same four gates, in order, with no step
+skipped and no step reordered. These are requirements, not suggestions.
+
+```
+     ┌─ 1. BRANCH ──────────────────────────────────────────┐
+     │  cut feature/<name> from develop                      │
+     └───────────────────────────┬───────────────────────────┘
+                                 ▼
+     ┌─ 2. DONE ────────────────────────────────────────────┐
+     │  every test layer passes; CI green on the branch      │
+     └───────────────────────────┬───────────────────────────┘
+                                 ▼
+     ┌─ 3. REVIEW ──────────────────────────────────────────┐
+     │  merge request, evaluated by a DIFFERENT agent        │
+     └───────────────────────────┬───────────────────────────┘
+                                 ▼
+     ┌─ 4. MERGE ───────────────────────────────────────────┐
+     │  only on approval → CI tags the version → release     │
+     └───────────────────────────────────────────────────────┘
+```
+
+### Gate 1 — One branch per loop
+
+A new loop MUST begin with a new feature branch cut from current `develop`.
+Feature branches are short-lived and single-purpose: one loop, one branch, one
+merge request. Do not continue a finished loop's branch into the next loop,
+and do not accumulate unrelated changes on one branch — a reviewer cannot
+meaningfully approve a branch that does three things.
+
+### Gate 2 — Definition of Done
+
+A loop is **done** when the tests pass. Concretely, all of these MUST be true
+before a merge request is opened:
+
+| Check | Command | Proves |
+| --- | --- | --- |
+| Unit + envtest | `make test` | Reconcile logic and the generated CRD schema |
+| Integration | `make test-integration` | Real cluster behaviour end to end |
+| Lint | `make lint` | No new correctness or style violations |
+| Generated code current | `make manifests generate helm-crds` leaves no diff | Committed CRDs match the Go types |
+| CI green | GitHub Actions on the pushed branch | It passes somewhere other than your machine |
+
+"Tests pass" means you ran them and read the output. A loop is not done
+because the change looks right, because it compiled, or because the tests were
+passing before you started. Green locally but red in CI is **not done**.
+
+If any check cannot pass for a defensible reason, say so explicitly in the
+merge request. Do not open one claiming done when it is not.
+
+### Gate 3 — Independent agent review
+
+Every merge into `develop` MUST go through a merge request. Every merge from
+`develop` into `main` MUST go through a merge request. There are no direct
+merges and no exceptions for small changes.
+
+**The merge request MUST be evaluated by a different agent than the one that
+wrote the change.** This is the central rule of this gate.
+
+An agent reviewing its own work is not review. It re-derives the same
+assumptions that produced the code, so the failure modes it missed while
+writing are exactly the ones it will miss while reading. Worse, it already
+believes the change is correct — it wrote it — so it reads to confirm rather
+than to falsify. A separate agent starts from the diff with no attachment to
+the approach and no memory of why a shortcut seemed reasonable at the time.
+
+The reviewing agent MUST:
+
+- Start from the **diff and the merge request description**, not from the
+  authoring conversation. A fresh context is the point; inheriting the
+  author's reasoning defeats it.
+- **Independently verify the Definition of Done** rather than trusting the
+  description. Run the tests. A merge request asserting "tests pass" is a
+  claim to check, not evidence.
+- Look for what the author could not see: unhandled error paths, missing test
+  coverage for the change, assumptions that hold only on the author's cluster,
+  breaking changes to the CRD schema, drift between RBAC markers and the chart.
+- Return an explicit verdict — **APPROVE**, or **REQUEST CHANGES** with
+  specific, actionable findings. "Looks good" is not a verdict.
+
+The authoring agent MUST NOT approve its own merge request, and MUST NOT
+merge on the strength of its own assessment.
+
+In Claude Code, spawn the reviewer as a subagent with its own context, or run
+the review in a separate session:
+
+```bash
+/code-review                       # reviews the current diff
+/code-review <pr-number>           # reviews a specific merge request
+gh pr create --base develop --fill # open the MR first
+```
+
+Blocking findings are fixed **on the same feature branch**, and the merge
+request is re-reviewed. A finding is not resolved by arguing it away in a
+comment; either change the code or explain in the merge request why the
+finding does not apply, and let the reviewer decide.
+
+### Gate 4 — Merge, tag, release
+
+Only an approved merge request may be merged. The merge is what authorises
+the version: merging into `develop` cuts the next MINOR, merging into `main`
+cuts the next MAJOR, and CI does the tagging (see below). Nothing is tagged
+or released that did not pass an independent review.
+
+### What never to do
+
+- **Never open a merge request before the Definition of Done is met.**
+- **Never review your own change.** If you wrote it, a different agent reviews it.
+- **Never merge an unreviewed or change-requested merge request.**
+- **Never merge directly into `develop` or `main`,** including fast-forward merges.
+- **Never tag or release a commit that did not come through an approved merge request.**
+
+---
+
+## Versioning: MAJOR.MINOR
+
+Versions are `MAJOR.MINOR`. There is no patch component.
+
+| Event | Effect | Example |
+| --- | --- | --- |
+| Push to `develop` | MINOR increments | `v1.4` → `v1.5` |
+| `develop` merged to `main` | MAJOR increments, MINOR resets to 0 | `v1.5` → `v2.0` |
+
+So a cycle reads: `v0.1`, `v0.2`, `v0.3` on `develop`, then `v1.0` when that
+work reaches `main`, then `v1.1`, `v1.2` on `develop`, then `v2.0`, and so on.
+
+**MAJOR here means "released", not "breaking".** This is a deliberate
+departure from SemVer: a major bump marks the promotion of `develop` into
+`main`, whatever the change contained. Communicate breaking changes in the
+release notes, because the version number will not signal them.
+
+### Who assigns versions
+
+GitHub Actions does, never a human. The version is derived from the highest
+existing `v*` git tag, so the tags themselves are the source of truth — there
+is no VERSION file to drift, and no commit written back to a branch.
+
+- Push to `develop` → tag `v<MAJOR>.<MINOR + 1>`
+- Push to `main` → tag `v<MAJOR + 1>.0`
+
+Never create a `v*` tag by hand. Doing so silently reassigns what CI computes
+next.
+
+### Two consequences worth knowing
+
+**Helm charts need a patch component, and `appVersion` must name a real image
+tag.** Helm requires full SemVer2, so `0.2` is rejected as a chart version.
+Charts are published as `MAJOR.MINOR.0` (`v0.2` → chart `0.2.0`).
+
+`appVersion` is set to the **unprefixed** `0.2`, not `v0.2`. The chart defaults
+`image.tag` to `.Chart.AppVersion`, and the published image tag is `0.2` — a
+`v`-prefixed `appVersion` renders an image reference that was never pushed, and
+every `helm install` fails with `ImagePullBackOff`. Whenever you change how
+versions are named, render the packaged chart and check the image reference
+against the tags the publish job actually pushes.
+
+**A tag pushed by CI does not trigger another workflow.** GitHub suppresses
+workflow triggers for pushes made with the default `GITHUB_TOKEN`, to prevent
+loops. A separate release workflow listening on `push: tags: v*` would
+therefore never fire. Everything that reacts to a new version — image tags,
+chart publish, GitHub release — must live in the same run that creates the
+tag.
+
+---
+
 ## Quick Start: Workflow Overview
 
 ```
-1. Feature Branch (gitflow feature/*)
+1. Feature branch cut from develop      (one loop, one branch)
    ↓
-2. Local Development + Local Cluster Testing
+2. Local development + local cluster testing
    ↓
-3. Unit & Integration Tests
+3. DEFINITION OF DONE: all test layers pass, CI green
    ↓
-4. Push to GitHub (auto-triggers Actions)
+4. Merge request opened against develop
    ↓
-5. GitHub Actions Validates (lint, test, build)
+5. REVIEW GATE: evaluated by a DIFFERENT agent than the author
+   ↓                              ↘ changes requested → back to 2
+6. Approved → merged into develop
    ↓
-6. Image Pushed to Docker Hub (develop + sha tags)
+7. Actions tag vMAJOR.(MINOR+1) and publish that image to Docker Hub
    ↓
-7. Code Review & Merge to develop
+8. When the line is ready: merge request from develop into main,
+   reviewed the same way
    ↓
-8. Release Branch (gitflow release/*)
+9. Actions tag v(MAJOR+1).0, publish the image, chart and GitHub release
    ↓
-9. Merge to main + Tag Release → versioned image on Docker Hub
-   ↓
-10. Deploy to Any Cluster via Helm/OCI
+10. Deploy to any cluster via Helm/OCI
 ```
 
 ---
@@ -363,25 +557,32 @@ in the workflow. Storing it as a secret adds no protection and creates a
 silent failure mode — a misnamed or missing username secret resolves to an
 empty string, and the login fails with a confusing error.
 
-### `.github/workflows/ci.yml` — On Every Push
+### `.github/workflows/ci.yml` — Validate, Version, Publish
 
-Validates the change, and on `develop` pushes an iteration image to Docker Hub so the latest build is always pullable.
+One workflow owns the whole line. It validates every push, and on `develop`
+and `main` it additionally assigns the next version, tags the commit, and
+publishes. The release steps live here rather than in a tag-triggered
+workflow because a tag pushed with `GITHUB_TOKEN` does not trigger one.
 
 ```yaml
 name: CI
 
 on:
   push:
-    branches: [ develop, main, 'release/**', 'feature/**' ]
+    branches: [ develop, main, 'feature/**', 'hotfix/**' ]
   pull_request:
     branches: [ develop, main ]
 
+# Cancel superseded PR runs, but never cancel a develop/main run: those
+# assign a version and publish, and a half-finished publish is worse than a
+# slow queue.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE: docker.io/partofaplan/kado-operator
+  # Not a secret: this namespace is public and already appears in IMAGE.
   DOCKERHUB_USER: partofaplan
 
 jobs:
@@ -393,8 +594,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Run linters
-        uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v8
         with:
           args: --timeout=5m
 
@@ -408,98 +608,50 @@ jobs:
           cache: true
       # Use the Makefile target: it provisions envtest binaries and sets
       # KUBEBUILDER_ASSETS, which a bare `go test ./...` would not.
-      - name: Run unit tests
-        run: make test
-      - name: Report coverage
-        run: go tool cover -func=cover.out | tail -1
+      - run: make test
 
-  build:
-    needs: [ lint, test ]
+  generated:
+    name: Generated code is up to date
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # Only authenticate when we actually intend to push. Pull requests from
-      # forks have no access to secrets, so they build without pushing.
-      - name: Log in to Docker Hub
-        if: github.event_name == 'push'
-        uses: docker/login-action@v3
+      - uses: actions/setup-go@v5
         with:
-          username: ${{ env.DOCKERHUB_USER }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          go-version-file: go.mod
+          cache: true
+      # helm-crds matters: without it the chart's CRD copy drifts, CI stays
+      # green, and the release job regenerates it at package time.
+      - run: make manifests generate helm-crds
+      - name: Fail if regeneration changed anything
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "::error::Generated files are out of date. Run 'make manifests generate helm-crds' and commit."
+            git --no-pager diff
+            exit 1
+          fi
 
-      # Derive tags from the ref: `develop` gets a moving tag plus an immutable
-      # sha tag, so you can always pin the exact build you tested.
-      - name: Derive image tags
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha,format=short
-
-      - name: Build and push operator image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-```
-
-### `.github/workflows/integration-test.yml` — Integration Tests
-
-The cluster provider is confined to a single step. Swapping K3D for Kind, or pointing at a remote cluster, changes only that step — the test command below it stays identical because it acts on the current kubectl context.
-
-```yaml
-name: Integration Tests
-
-on:
-  push:
-    branches: [ develop, main, 'release/**' ]
-  pull_request:
-    branches: [ develop, main ]
-
-concurrency:
-  group: integration-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
+  # Lives here rather than in its own workflow so that `version` can depend on
+  # it. Only the cluster-provisioning step is provider-specific.
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      # --- Cluster provisioning: the ONLY provider-specific step. ---
-      # Swap this for Kind, minikube, or a kubeconfig secret pointing at a
-      # remote cluster. Everything after it is provider-agnostic.
+      # --- The ONLY provider-specific step. Swap for Kind, minikube, or a
+      # kubeconfig secret pointing at a remote cluster; everything below acts
+      # on the current kubectl context. ---
       - name: Create ephemeral cluster
         run: |
-          curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.7.4 bash
           k3d cluster create ci --kubeconfig-update-default --wait
-      # --- End provider-specific section. ---
 
       - name: Show target cluster
         run: kubectl config current-context && kubectl get nodes
-
-      - name: Install CRDs
-        run: make install
-
-      - name: Build operator image
-        run: make docker-build IMG=partofaplan/kado-operator:ci
 
       - name: Run integration tests
         run: make test-integration
@@ -508,146 +660,292 @@ jobs:
         if: failure()
         run: |
           kubectl get devenvironments -A -o wide || true
-          kubectl describe devenvironments -A || true
           kubectl get all -A -l app.kubernetes.io/managed-by=kado-operator || true
-```
 
-### `.github/workflows/release.yml` — Release & Deploy
-
-```yaml
-name: Release
-
-on:
-  push:
-    tags:
-      - 'v*'
-
-env:
-  IMAGE: docker.io/partofaplan/kado-operator
-  DOCKERHUB_USER: partofaplan
-
-jobs:
-  release:
+  # Assigns MAJOR.MINOR from the highest existing tag. Only develop and main
+  # produce versions; feature branches are validated but never versioned.
+  version:
+    name: Assign version
+    # Integration is a dependency, not a separate workflow: a separate
+    # workflow cannot gate this one, so a release could be cut with integration
+    # tests red — contradicting the Definition of Done.
+    needs: [ lint, test, generated, integration ]
+    if: github.event_name == 'push' && contains(fromJSON('["develop","main"]'), github.ref_name)
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
+    # Serialised and never cancelled: two runs computing "the next version"
+    # concurrently would race to push the same tag.
+    concurrency:
+      group: version-assign
+      cancel-in-progress: false
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      chart: ${{ steps.next.outputs.chart }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history for changelog generation
+          fetch-depth: 0   # tags are the source of truth; we need all of them
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
+      - name: Compute next version
+        id: next
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Match ONLY strict vMAJOR.MINOR. A glob like 'v[0-9]*.[0-9]*' would
+          # also match v1.2-rc1 or v1.2.3, and the arithmetic below would then
+          # expand a non-numeric minor and produce an empty version.
+          latest=$(git tag --list 'v*' --sort=-v:refname \
+                     | grep -E '^v[0-9]+\.[0-9]+$' | head -n1 || true)
+          latest=${latest:-v0.0}
+          ver=${latest#v}
+          major=${ver%%.*}
+          minor=${ver#*.}
+          case "$BRANCH" in
+            # 10# forces base 10, so a tag like v1.08 is not read as octal.
+            develop) next="${major}.$((10#$minor + 1))" ;;   # MINOR on every dev build
+            main)    next="$((10#$major + 1)).0" ;;          # MAJOR on promotion
+            *)       echo "::error::refusing to version branch $BRANCH"; exit 1 ;;
+          esac
+          # Never publish a malformed version.
+          [[ "$next" =~ ^[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::computed bad version '$next' from '$latest'"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/v${next}" >/dev/null; then
+            echo "::error::tag v${next} already exists"; exit 1
+          fi
+          echo "version=${next}" >> "$GITHUB_OUTPUT"
+          # Helm demands full SemVer2, so the chart carries an explicit patch.
+          echo "chart=${next}.0" >> "$GITHUB_OUTPUT"
+          echo "$latest -> v${next}" >> "$GITHUB_STEP_SUMMARY"
 
-      # A tag that cannot pass its own tests must not become a release.
-      - name: Run tests
-        run: make test
+      - name: Tag the commit
+        run: |
+          set -euo pipefail
+          V="v${{ steps.next.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$V" -m "$V from ${{ github.ref_name }}"
+          git push origin "$V"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+  publish:
+    name: Build & publish image
+    needs: [ version ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push image
+      # The version tag is the durable one. The branch tag is a convenience
+      # pointer, the sha tag an immutable escape hatch. `latest` follows main.
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=ref,event=branch
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
+
+      - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Only a promotion to main produces a release artifact set.
+  release:
+    name: Publish release
+    needs: [ version, publish ]
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # make helm-crds and make build-installer run go-installed tools.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Package and push Helm chart
+        env:
+          V: ${{ needs.version.outputs.version }}
+          CHART: ${{ needs.version.outputs.chart }}
         run: |
-          VERSION="${{ github.ref_name }}"
+          set -euo pipefail
+          make helm-crds
+          # appVersion must name a tag that is actually published.
           helm package charts/kado-operator \
-            --version "${VERSION#v}" \
-            --app-version "${VERSION}" \
-            --destination dist/
+            --version "$CHART" --app-version "$V" --destination dist/
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
             --username "${{ env.DOCKERHUB_USER }}" --password-stdin
-          helm push "dist/kado-operator-${VERSION#v}.tgz" oci://registry-1.docker.io/partofaplan
+          helm push "dist/kado-operator-${CHART}.tgz" oci://registry-1.docker.io/partofaplan
 
-      - name: Create Release Notes
-        run: |
-          VERSION="${{ github.ref_name }}"
-          PREV=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || true)
-          {
-            echo "# kado-operator ${VERSION}"
-            echo
-            echo "## Install"
-            echo '```bash'
-            echo "helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \\"
-            echo "  --version ${VERSION#v} --namespace kado-operator-system --create-namespace"
-            echo '```'
-            echo
-            echo "## Container Image"
-            echo '```'
-            echo "docker.io/partofaplan/kado-operator:${VERSION}"
-            echo '```'
-            echo
-            echo "## Changes"
-            if [ -n "$PREV" ]; then
-              git log --pretty='- %s (%h)' "${PREV}..${VERSION}"
-            else
-              git log --pretty='- %s (%h)' "${VERSION}"
-            fi
-          } > RELEASE.md
+      - name: Build install manifest
+        run: make build-installer IMG=${{ env.IMAGE }}:${{ needs.version.outputs.version }}
 
-      - name: Create GitHub Release
+      - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: RELEASE.md
-          files: dist/kado-operator-*.tgz
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-rc') }}
+          tag_name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/install.yaml
+            dist/kado-operator-*.tgz
 ```
+
+Note what is *absent*: no `release.yml` triggered by `push: tags: v*`. Tags
+are created by this workflow using `GITHUB_TOKEN`, and GitHub does not fire
+workflows for such pushes. A tag-triggered release workflow would sit there
+looking correct and never run.
+
+The integration job is also *present* rather than living in its own workflow.
+That is deliberate: a separate workflow cannot be a `needs` dependency, so
+`version` could not gate on it, and a release could be tagged and published
+while integration tests were failing.
+
+**This listing is abridged.** The repository's `.github/workflows/ci.yml` is
+authoritative and carries additional detail (pinned linter version, coverage
+reporting, step summaries). Read that file before changing CI; do not treat
+this excerpt as the current state of the pipeline.
+
+### Why there is no separate integration workflow
+
+The integration job is a job inside `ci.yml`, not a workflow of its own.
+
+A workflow cannot declare a `needs` dependency on a *different* workflow. With
+integration tests in their own file, `version` could not wait for them, so a
+merge to `main` could tag, publish and release while integration tests were
+still running or already red. The Definition of Done requires them to pass, so
+they have to sit upstream of `version` in the same run.
+
+The cost is that every push runs a cluster, making CI slower. That is the
+right trade: a release that skipped its integration tests is worse than a
+pipeline that takes four more minutes.
 
 ---
 
 ## Phase 6: Gitflow Workflow in Practice
 
-### Starting a Feature
+### Every change starts on a feature branch
+
+This is the rule from the top of this skill, restated where the work happens:
+**never commit to `develop` or `main` directly.** A direct commit to `develop`
+cuts a version and publishes an image with no review.
+
 ```bash
-git flow feature start env-provisioner-crd
-# Work on code, commit regularly
+git checkout develop
+git pull --ff-only
+git checkout -b feature/env-provisioner-crd
+
+# work, committing as you go
 git add .
 git commit -m "feat: add DevEnvironment CRD schema"
+git push -u origin feature/env-provisioner-crd
 ```
 
-### Finishing a Feature (into develop)
+Pushing a feature branch runs lint, tests and the generated-code check. It
+does **not** assign a version and does **not** publish an image — only
+`develop` and `main` do that.
+
+### Finishing a feature
+
+Meet the Definition of Done first — all test layers green, CI green on the
+pushed branch. Only then open the merge request.
+
 ```bash
-git flow feature finish env-provisioner-crd
-# Or merge manually:
-git checkout develop && git merge --no-ff feature/env-provisioner-crd
+gh pr create --base develop --fill
 ```
 
-Merging to `develop` publishes a `develop` and `sha-<short>` image to Docker Hub, so the newest build is always pullable for testing on a shared cluster.
+Then hand it to a **different agent** for review. The author does not approve
+its own work:
 
-### Creating a Release
 ```bash
-git flow release start v0.1.0
-# Update Chart.yaml version/appVersion, CHANGELOG
-git commit -am "chore: bump to v0.1.0"
-git flow release finish v0.1.0
-# Tags main branch, merges back to develop
-git push origin main develop --tags   # the tag triggers the release workflow
+/code-review <pr-number>
 ```
 
----
+Merge only on APPROVE. If changes are requested, fix them on the same feature
+branch, push, and have the reviewer re-evaluate.
+
+The merge commit lands on `develop`, which:
+
+1. assigns the next MINOR (`v1.4` → `v1.5`),
+2. tags the merge commit `v1.5`,
+3. publishes `partofaplan/kado-operator:1.5`, plus `develop` and `sha-<short>`.
+
+### Promoting to main
+
+When a line of work is ready, promote `develop` to `main` — through a merge
+request, reviewed by a separate agent, exactly like a feature. A promotion is
+a release; it gets *more* scrutiny than a feature, not less. There is no
+version to bump by hand and no release branch to prepare — CI computes the
+MAJOR.
+
+```bash
+gh pr create --base main --head develop \
+  --title "Release: promote develop to main" --fill
+/code-review <pr-number>        # a different agent evaluates it
+# merge only on APPROVE
+```
+
+That push tags `v2.0`, publishes `partofaplan/kado-operator:2.0` and moves
+`latest`, pushes the chart as `2.0.0`, and creates the GitHub release.
+
+Then bring `main` back into `develop` so the branches do not diverge:
+
+```bash
+git checkout develop
+git merge --no-ff main
+git push origin develop
+```
+
+That merge is itself a push to `develop`, so it cuts `v2.1`. This is expected:
+the first development build after a release is `MAJOR.1`.
+
+### Hotfixes
+
+A production fix still goes through a branch, but branches from `main`:
+
+```bash
+git checkout -b hotfix/nil-deref-on-delete main
+# fix, meet the Definition of Done, open an MR into main,
+# have a separate agent review it, then merge
+```
+
+Urgency does not waive the review gate. A hotfix is the change most likely to
+be written quickly and least likely to have been thought through.
+
+Merging it to `main` cuts the next MAJOR, because `main` only ever produces
+MAJOR versions. Merge `main` back into `develop` afterwards.
+
+### What never to do
+
+- **Never commit directly to `develop` or `main`.**
+- **Never merge without an approved review from a different agent.**
+- **Never create a `v*` tag by hand.** CI derives the next version from the
+  highest existing tag; a hand-made tag silently reassigns everything after it.
+- **Never delete or move a published tag.** Images are already pushed against
+  it; the tag and the image would disagree.
 
 ## Phase 7: Deployment to Any Cluster
 
@@ -659,10 +957,15 @@ Create `charts/kado-operator/Chart.yaml`:
 ```yaml
 apiVersion: v2
 name: kado-operator
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.0       # overwritten at publish time with MAJOR.MINOR.0
+appVersion: "0.1"    # overwritten at publish time with MAJOR.MINOR
 description: Operator for provisioning dev environments in Kubernetes
 ```
+
+The committed values are only a floor. CI packages the chart with
+`--version MAJOR.MINOR.0 --app-version MAJOR.MINOR`: Helm rejects a
+two-component chart version, while `appVersion` must match a published image
+tag exactly, because the chart defaults `image.tag` to it.
 
 And in `values.yaml`, point at Docker Hub:
 ```yaml
@@ -719,38 +1022,57 @@ make test-integration
 
 When using Claude Code (or Claude in your IDE):
 
-1. **Open the repo in Claude Code**
+1. **Cut a feature branch first**
+   ```bash
+   git checkout develop && git pull --ff-only
+   git checkout -b feature/<short-description>
+   ```
+   This applies to assistant-made changes exactly as it does to hand-written
+   ones. If you find yourself on `develop` with uncommitted work, move it:
+   `git stash && git checkout -b feature/… && git stash pop`.
+
+2. **Open the repo in Claude Code**
    - Load `internal/controller/devenvironment_controller.go`
    - Load test files for context
 
-2. **Write a feature**
+3. **Write a feature**
    - Claude suggests controller changes
    - Generates test cases alongside code
    - Provides `make` commands to validate
 
-3. **Test locally**
+4. **Reach the Definition of Done**
    ```bash
-   make test                  # Unit tests — no cluster
+   make test                  # Unit + envtest — no cluster
+   make test-integration      # Against your current context
    make lint                  # Catch issues early
-   make install && make run   # Against your current context
+   make manifests generate helm-crds && git status --porcelain   # must be empty
    ```
+   Read the output. The loop is not done until every layer is green.
 
-4. **Iterate based on feedback**
-   - Push to feature branch
+5. **Iterate based on feedback**
+   - Push the feature branch
    - GitHub Actions run automatically
    - Review action output (coverage, lint results)
-   - Make adjustments and push again
+   - Make adjustments and push again until CI is green
 
-5. **Merge to develop**
-   - Feature tests pass ✅
-   - Actions green ✅
-   - Merge via `git flow feature finish`
-   - Iteration image lands on Docker Hub
+6. **Open the merge request and hand it off**
+   ```bash
+   gh pr create --base develop --fill
+   /code-review <pr-number>
+   ```
+   The review MUST come from a different agent than the one that wrote the
+   change. If you authored it, you do not approve it. Fix any blocking
+   findings on the same branch and have it re-reviewed.
 
-6. **Release when ready**
-   - `git flow release start vX.Y.Z`
-   - GitHub Actions builds & pushes the multi-arch image
-   - Tag created, image available at `docker.io/partofaplan/kado-operator:vX.Y.Z`
+7. **Merge on approval**
+   - Merge the approved merge request into `develop`
+   - CI cuts the next MINOR and publishes that image
+
+8. **Release when ready**
+   - Open a merge request from `develop` into `main`, reviewed the same way
+   - On approval and merge, CI cuts the next MAJOR, publishes the image and
+     chart, moves `latest`, and creates the GitHub release
+   - Merge `main` back into `develop`
 
 ---
 
@@ -758,8 +1080,12 @@ When using Claude Code (or Claude in your IDE):
 
 - **Test Coverage**: Aim for >80% on controllers
 - **Build Time**: Keep CI <10 min (critical for iteration speed)
-- **Time to Merge**: Feature branch → develop should be <1 day
-- **Release Cadence**: Target weekly or bi-weekly releases
+- **Time to Merge**: Feature branch → develop should be <1 day, review included
+- **Review Turnaround**: A merge request should be evaluated the same day it
+  opens — a slow review gate is the one people start routing around
+- **Unreviewed Merges**: Zero. Any merge without an approving review from a
+  separate agent is a process failure, whatever the change contained
+- **Release Cadence**: Target weekly or bi-weekly promotions of `develop` to `main`
 - **Portability**: Integration suite green on at least two distributions
 
 ---
@@ -811,6 +1137,29 @@ kubectl create secret docker-registry dockerhub \
 - Confirm the token has **Read/Write** scope and has not expired
 - Pull requests from forks cannot read secrets — those runs build without pushing, which is expected
 
+### A Merge Request Cannot Clear Review
+
+| Symptom | What it means |
+| --- | --- |
+| Reviewer cannot reproduce "tests pass" | The Definition of Done was asserted, not met. Run every layer and paste the output into the merge request. |
+| Reviewer keeps finding the same class of issue | The loop is too large. Split it: one loop, one concern. |
+| You are tempted to approve your own change | That is the rule working. Spawn a separate reviewing agent. |
+| Review is blocking an urgent fix | Urgency is not an exemption. A hotfix is the change most likely to be wrong. |
+
+### Version Was Not Assigned, or Jumped
+
+```bash
+git fetch --tags
+git tag --list 'v*' --sort=-v:refname | head -5
+```
+
+| Symptom | Cause |
+| --- | --- |
+| No tag after a merge to `develop` | The run failed before the `version` job, or the push was to a feature branch, which is never versioned. |
+| MINOR jumped several numbers | Someone created a `v*` tag by hand; CI counts from the highest tag it finds. |
+| Two runs raced for the same tag | The `version-assign` concurrency group is missing, so runs were not serialised. |
+| Tag exists but no image | The `publish` job failed after tagging. Re-running it republishes; the tag is already correct. |
+
 ### GitHub Actions Fails Locally
 Run the same commands Actions runs:
 ```bash
@@ -843,11 +1192,15 @@ escaped into non-helper code.
 2. **Copy GitHub Actions workflows** to `.github/workflows/`
 3. **Add the `DOCKERHUB_TOKEN`** repository secret
 4. **Add Makefile targets** from Phase 4
-5. **Write first feature branch** and test locally
-6. **Verify Actions run** on PR to develop, and the image appears on Docker Hub
-7. **Document custom resources** in `docs/` folder
-8. **Set up Helm chart** for multi-cluster deployment
-9. **Run the integration suite on a second distribution** to prove portability
+5. **Write first feature branch** (cut from `develop`) and test locally
+6. **Verify Actions run** on the PR, then confirm the merge to `develop` cuts
+   a MINOR tag and publishes that image to Docker Hub
+7. **Protect `develop` and `main`** so the feature-branch and review rules are
+   enforced by the forge, not by discipline alone — require a merge request,
+   require an approving review, and require CI to pass before merge
+8. **Document custom resources** in `docs/` folder
+9. **Set up Helm chart** for multi-cluster deployment
+10. **Run the integration suite on a second distribution** to prove portability
 
 ---
 
