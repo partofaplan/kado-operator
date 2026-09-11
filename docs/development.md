@@ -180,10 +180,12 @@ for the newest merged work, and `sha-<short>` or a digest whenever the build
 must be reproducible — a pinned deployment, a bug report, a rollback. Each CI
 run prints the digest it published in its job summary.
 
-CI needs two repository secrets, `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` —
-the latter a Docker Hub access token with Read/Write scope, never the account
-password. Pull requests from forks cannot read secrets, so those runs build
-without pushing.
+CI needs one repository secret, `DOCKERHUB_TOKEN`: a Docker Hub access token
+with Read/Write scope, never the account password. Create it at
+<https://hub.docker.com/settings/security>. The username is not a secret — it
+is the public `partofaplan` namespace already present in the image name — so
+it lives in the workflows as a plain `DOCKERHUB_USER` env var. Pull requests
+from forks cannot read secrets, so those runs build without pushing.
 
 Only the "Create ephemeral cluster" step of `integration-test.yml` is
 provider-specific. Swapping K3D for Kind, or for a kubeconfig secret pointing

@@ -30,7 +30,7 @@ Images are published to **Docker Hub** under the `partofaplan` namespace:
 - Repository: <https://hub.docker.com/repositories/partofaplan>
 - Image: `docker.io/partofaplan/kado-operator`
 
-CI authenticates with the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets (the token being a Docker Hub access token, not the account password).
+CI authenticates with a single `DOCKERHUB_TOKEN` repository secret (a Docker Hub access token, not the account password). The username is not secret — it is the public namespace above — so it stays a plain `DOCKERHUB_USER` env var in the workflow.
 
 ---
 
@@ -349,14 +349,19 @@ help:
 
 Create `.github/workflows/` files to automate your SDLC.
 
-**Required repository secrets:**
+**Required repository secret:**
 
 | Secret | Value |
 | --- | --- |
-| `DOCKERHUB_USERNAME` | Your Docker Hub username (`partofaplan`) |
 | `DOCKERHUB_TOKEN` | A Docker Hub access token with Read/Write scope |
 
 Create the token at <https://hub.docker.com/settings/security> — never use the account password.
+
+The Docker Hub *username* is not a secret: it is the public namespace already
+embedded in every image reference. Keep it as a plain `DOCKERHUB_USER` env var
+in the workflow. Storing it as a secret adds no protection and creates a
+silent failure mode — a misnamed or missing username secret resolves to an
+empty string, and the login fails with a confusing error.
 
 ### `.github/workflows/ci.yml` — On Every Push
 
@@ -377,6 +382,7 @@ concurrency:
 
 env:
   IMAGE: docker.io/partofaplan/kado-operator
+  DOCKERHUB_USER: partofaplan
 
 jobs:
   lint:
@@ -422,7 +428,7 @@ jobs:
         if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Derive tags from the ref: `develop` gets a moving tag plus an immutable
@@ -518,6 +524,7 @@ on:
 
 env:
   IMAGE: docker.io/partofaplan/kado-operator
+  DOCKERHUB_USER: partofaplan
 
 jobs:
   release:
@@ -548,7 +555,7 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push image
@@ -571,7 +578,7 @@ jobs:
             --app-version "${VERSION}" \
             --destination dist/
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
-            --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            --username "${{ env.DOCKERHUB_USER }}" --password-stdin
           helm push "dist/kado-operator-${VERSION#v}.tgz" oci://registry-1.docker.io/partofaplan
 
       - name: Create Release Notes
@@ -799,7 +806,8 @@ kubectl create secret docker-registry dockerhub \
 ```
 
 ### Docker Hub Push Denied in CI
-- Confirm `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are set as repository secrets
+- Confirm `DOCKERHUB_TOKEN` is set as a repository secret and `DOCKERHUB_USER` is set in the workflow env
+- An empty username resolves silently: check the login step's resolved username, not just that a secret exists
 - Confirm the token has **Read/Write** scope and has not expired
 - Pull requests from forks cannot read secrets — those runs build without pushing, which is expected
 
@@ -833,7 +841,7 @@ escaped into non-helper code.
 
 1. **Scaffold the operator** using kubebuilder (if not done)
 2. **Copy GitHub Actions workflows** to `.github/workflows/`
-3. **Add `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`** repository secrets
+3. **Add the `DOCKERHUB_TOKEN`** repository secret
 4. **Add Makefile targets** from Phase 4
 5. **Write first feature branch** and test locally
 6. **Verify Actions run** on PR to develop, and the image appears on Docker Hub

@@ -150,10 +150,11 @@ That triggers the release workflow: run tests, push the multi-arch image and
 its semver tags, publish the chart to the OCI registry, and create a GitHub
 release with `install.yaml` and the chart archive attached.
 
-CI needs two repository secrets, `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` —
-the latter a Docker Hub access token with Read/Write scope, never the account
-password. Pull requests from forks cannot read secrets, so those runs build
-without pushing.
+CI needs one repository secret, `DOCKERHUB_TOKEN`: a Docker Hub access token
+with Read/Write scope, never the account password. The username is not a
+secret — it is the public `partofaplan` namespace already present in the image
+name — so it lives in the workflow as a plain `DOCKERHUB_USER` env var. Pull
+requests from forks cannot read secrets, so those runs build without pushing.
 
 ## Documentation
 

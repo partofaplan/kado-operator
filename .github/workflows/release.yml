@@ -7,6 +7,8 @@ on:
 
 env:
   IMAGE: docker.io/partofaplan/kado-operator
+  # Not a secret: this namespace is public and already appears in IMAGE.
+  DOCKERHUB_USER: partofaplan
 
 jobs:
   release:
@@ -39,7 +41,7 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # v1.2.3 publishes 1.2.3, 1.2 and 1, so consumers can track a patch line
@@ -85,7 +87,7 @@ jobs:
             --app-version "${VERSION}" \
             --destination dist/
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
-            --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            --username "${{ env.DOCKERHUB_USER }}" --password-stdin
           helm push "dist/kado-operator-${VERSION#v}.tgz" oci://registry-1.docker.io/partofaplan
 
       - name: Generate release notes
