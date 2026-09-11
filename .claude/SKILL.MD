@@ -207,9 +207,16 @@ next.
 
 ### Two consequences worth knowing
 
-**Helm charts need a patch component.** Helm requires full SemVer2, so `0.2`
-is rejected as a chart version. Charts are published as `MAJOR.MINOR.0`
-(`v0.2` → chart `0.2.0`) with `appVersion` carrying the real `v0.2`.
+**Helm charts need a patch component, and `appVersion` must name a real image
+tag.** Helm requires full SemVer2, so `0.2` is rejected as a chart version.
+Charts are published as `MAJOR.MINOR.0` (`v0.2` → chart `0.2.0`).
+
+`appVersion` is set to the **unprefixed** `0.2`, not `v0.2`. The chart defaults
+`image.tag` to `.Chart.AppVersion`, and the published image tag is `0.2` — a
+`v`-prefixed `appVersion` renders an image reference that was never pushed, and
+every `helm install` fails with `ImagePullBackOff`. Whenever you change how
+versions are named, render the packaged chart and check the image reference
+against the tags the publish job actually pushes.
 
 **A tag pushed by CI does not trigger another workflow.** GitHub suppresses
 workflow triggers for pushes made with the default `GITHUB_TOKEN`, to prevent
@@ -612,6 +619,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # helm-crds matters: without it the chart's CRD copy drifts, CI stays
+      # green, and the release job regenerates it at package time.
       - run: make manifests generate helm-crds
       - name: Fail if regeneration changed anything
         run: |
@@ -621,11 +630,46 @@ jobs:
             exit 1
           fi
 
+  # Lives here rather than in its own workflow so that `version` can depend on
+  # it. Only the cluster-provisioning step is provider-specific.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # --- The ONLY provider-specific step. Swap for Kind, minikube, or a
+      # kubeconfig secret pointing at a remote cluster; everything below acts
+      # on the current kubectl context. ---
+      - name: Create ephemeral cluster
+        run: |
+          curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.7.4 bash
+          k3d cluster create ci --kubeconfig-update-default --wait
+
+      - name: Show target cluster
+        run: kubectl config current-context && kubectl get nodes
+
+      - name: Run integration tests
+        run: make test-integration
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get devenvironments -A -o wide || true
+          kubectl get all -A -l app.kubernetes.io/managed-by=kado-operator || true
+
   # Assigns MAJOR.MINOR from the highest existing tag. Only develop and main
   # produce versions; feature branches are validated but never versioned.
   version:
     name: Assign version
-    needs: [ lint, test, generated ]
+    # Integration is a dependency, not a separate workflow: a separate
+    # workflow cannot gate this one, so a release could be cut with integration
+    # tests red — contradicting the Definition of Done.
+    needs: [ lint, test, generated, integration ]
     if: github.event_name == 'push' && contains(fromJSON('["develop","main"]'), github.ref_name)
     runs-on: ubuntu-latest
     permissions:
@@ -659,8 +703,9 @@ jobs:
           major=${ver%%.*}
           minor=${ver#*.}
           case "$BRANCH" in
-            develop) next="${major}.$((minor + 1))" ;;   # MINOR on every dev build
-            main)    next="$((major + 1)).0" ;;          # MAJOR on promotion
+            # 10# forces base 10, so a tag like v1.08 is not read as octal.
+            develop) next="${major}.$((10#$minor + 1))" ;;   # MINOR on every dev build
+            main)    next="$((10#$major + 1)).0" ;;          # MAJOR on promotion
             *)       echo "::error::refusing to version branch $BRANCH"; exit 1 ;;
           esac
           # Never publish a malformed version.
@@ -735,6 +780,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # make helm-crds and make build-installer run go-installed tools.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Package and push Helm chart
         env:
           V: ${{ needs.version.outputs.version }}
@@ -742,8 +793,9 @@ jobs:
         run: |
           set -euo pipefail
           make helm-crds
+          # appVersion must name a tag that is actually published.
           helm package charts/kado-operator \
-            --version "$CHART" --app-version "v$V" --destination dist/
+            --version "$CHART" --app-version "$V" --destination dist/
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
             --username "${{ env.DOCKERHUB_USER }}" --password-stdin
           helm push "dist/kado-operator-${CHART}.tgz" oci://registry-1.docker.io/partofaplan
@@ -767,63 +819,31 @@ are created by this workflow using `GITHUB_TOKEN`, and GitHub does not fire
 workflows for such pushes. A tag-triggered release workflow would sit there
 looking correct and never run.
 
-### `.github/workflows/integration-test.yml` — Integration Tests
+The integration job is also *present* rather than living in its own workflow.
+That is deliberate: a separate workflow cannot be a `needs` dependency, so
+`version` could not gate on it, and a release could be tagged and published
+while integration tests were failing.
 
-The cluster provider is confined to a single step. Swapping K3D for Kind, or pointing at a remote cluster, changes only that step — the test command below it stays identical because it acts on the current kubectl context.
+**This listing is abridged.** The repository's `.github/workflows/ci.yml` is
+authoritative and carries additional detail (pinned linter version, coverage
+reporting, step summaries). Read that file before changing CI; do not treat
+this excerpt as the current state of the pipeline.
 
-```yaml
-name: Integration Tests
+### Why there is no separate integration workflow
 
-on:
-  push:
-    branches: [ develop, main, 'release/**' ]
-  pull_request:
-    branches: [ develop, main ]
+The integration job is a job inside `ci.yml`, not a workflow of its own.
 
-concurrency:
-  group: integration-${{ github.ref }}
-  cancel-in-progress: true
+A workflow cannot declare a `needs` dependency on a *different* workflow. With
+integration tests in their own file, `version` could not wait for them, so a
+merge to `main` could tag, publish and release while integration tests were
+still running or already red. The Definition of Done requires them to pass, so
+they have to sit upstream of `version` in the same run.
 
-jobs:
-  integration:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
+The cost is that every push runs a cluster, making CI slower. That is the
+right trade: a release that skipped its integration tests is worse than a
+pipeline that takes four more minutes.
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # --- Cluster provisioning: the ONLY provider-specific step. ---
-      # Swap this for Kind, minikube, or a kubeconfig secret pointing at a
-      # remote cluster. Everything after it is provider-agnostic.
-      - name: Create ephemeral cluster
-        run: |
-          curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
-          k3d cluster create ci --kubeconfig-update-default --wait
-      # --- End provider-specific section. ---
-
-      - name: Show target cluster
-        run: kubectl config current-context && kubectl get nodes
-
-      - name: Install CRDs
-        run: make install
-
-      - name: Build operator image
-        run: make docker-build IMG=partofaplan/kado-operator:ci
-
-      - name: Run integration tests
-        run: make test-integration
-
-      - name: Dump cluster state on failure
-        if: failure()
-        run: |
-          kubectl get devenvironments -A -o wide || true
-          kubectl describe devenvironments -A || true
-          kubectl get all -A -l app.kubernetes.io/managed-by=kado-operator || true
-```
+---
 
 ## Phase 6: Gitflow Workflow in Practice
 
@@ -937,14 +957,15 @@ Create `charts/kado-operator/Chart.yaml`:
 ```yaml
 apiVersion: v2
 name: kado-operator
-version: 0.1.0        # overwritten at publish time with MAJOR.MINOR.0
-appVersion: "v0.1"    # overwritten at publish time with the real vMAJOR.MINOR
+version: 0.1.0       # overwritten at publish time with MAJOR.MINOR.0
+appVersion: "0.1"    # overwritten at publish time with MAJOR.MINOR
 description: Operator for provisioning dev environments in Kubernetes
 ```
 
 The committed values are only a floor. CI packages the chart with
-`--version MAJOR.MINOR.0 --app-version vMAJOR.MINOR`, because Helm rejects a
-two-component version but the application itself has no patch component.
+`--version MAJOR.MINOR.0 --app-version MAJOR.MINOR`: Helm rejects a
+two-component chart version, while `appVersion` must match a published image
+tag exactly, because the chart defaults `image.tag` to it.
 
 And in `values.yaml`, point at Docker Hub:
 ```yaml

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ develop, main, 'release/**', 'feature/**', 'hotfix/**' ]
+    branches: [ develop, main, 'feature/**', 'hotfix/**' ]
   pull_request:
     branches: [ develop, main ]
 
@@ -50,13 +50,16 @@ jobs:
       # A stale zz_generated.deepcopy.go or CRD manifest means the cluster gets
       # a schema that does not match the Go types, so fail loudly here rather
       # than at apply time.
-      - name: Regenerate manifests and deepcopy
-        run: make manifests generate
+      # helm-crds is included deliberately: without it the chart's copy of the
+      # CRD can drift from config/crd/bases, CI stays green, and the release
+      # job regenerates it at package time — shipping a CRD nobody reviewed.
+      - name: Regenerate manifests, deepcopy and chart CRDs
+        run: make manifests generate helm-crds
 
       - name: Fail if regeneration changed anything
         run: |
           if [[ -n "$(git status --porcelain)" ]]; then
-            echo "::error::Generated files are out of date. Run 'make manifests generate' and commit the result."
+            echo "::error::Generated files are out of date. Run 'make manifests generate helm-crds' and commit the result."
             git --no-pager diff
             exit 1
           fi
@@ -86,17 +89,70 @@ jobs:
           name: coverage
           path: cover.out
 
+  # Folded in from the old integration-test.yml so that `version` can depend on
+  # it. A separate workflow cannot be a `needs` dependency, which meant a
+  # release could be tagged and published while integration tests were red —
+  # contradicting the Definition of Done that requires them.
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # --- Cluster provisioning: the ONLY provider-specific step. ---
+      # Swap this for Kind, minikube, or a kubeconfig secret pointing at a
+      # remote cluster. Every step below acts on the current kubectl context
+      # and is unaffected by the choice.
+      - name: Create ephemeral cluster
+        run: |
+          curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.7.4 bash
+          k3d cluster create ci --kubeconfig-update-default --wait
+      # --- End provider-specific section. ---
+
+      - name: Show target cluster
+        run: |
+          kubectl config current-context
+          kubectl get nodes
+
+      # The suite runs the manager in-process against the cluster, so the image
+      # is not needed for the tests themselves. Building it still proves the
+      # Dockerfile works.
+      - name: Build operator image
+        run: make docker-build IMAGE_TAG=ci
+
+      - name: Run integration tests
+        run: make test-integration
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get devenvironments -A -o wide || true
+          kubectl describe devenvironments -A || true
+          kubectl get ns
+          kubectl get all -A -l app.kubernetes.io/managed-by=kado-operator || true
+
   # Assigns MAJOR.MINOR from the highest existing tag. Only develop and main
   # produce versions; feature branches are validated but never versioned.
   version:
     name: Assign version
-    needs: [ lint, test, generated ]
+    needs: [ lint, test, generated, integration ]
     if: github.event_name == 'push' && contains(fromJSON('["develop","main"]'), github.ref_name)
     runs-on: ubuntu-latest
     permissions:
       contents: write
     # Serialised and never cancelled: two runs computing "the next version"
     # concurrently would race to push the same tag.
+    #
+    # Caveat: GitHub keeps only ONE run pending per concurrency group, so with
+    # three merges in quick succession the middle run is cancelled and that
+    # commit gets no version and no image. Space merges out, or re-run the
+    # cancelled one.
     concurrency:
       group: version-assign
       cancel-in-progress: false
@@ -117,15 +173,23 @@ jobs:
           # Match ONLY strict vMAJOR.MINOR. A glob like 'v[0-9]*.[0-9]*' would
           # also match v1.2-rc1 or v1.2.3, and the arithmetic below would then
           # expand a non-numeric minor into an empty version.
-          latest=$(git tag --list 'v*' --sort=-v:refname \
+          strict=$(git tag --list 'v*' --sort=-v:refname \
                      | grep -E '^v[0-9]+\.[0-9]+$' | head -n1 || true)
-          latest=${latest:-v0.0}
+          # If v* tags exist but none are well formed, numbering would silently
+          # restart at v0.1 and move the version backwards. Fail instead.
+          if [[ -z "$strict" && -n "$(git tag --list 'v*' | head -n1)" ]]; then
+            echo "::error::v* tags exist but none match vMAJOR.MINOR; refusing to restart numbering"
+            exit 1
+          fi
+          latest=${strict:-v0.0}
           ver=${latest#v}
           major=${ver%%.*}
           minor=${ver#*.}
+          # 10# forces base 10: a tag like v1.08 would otherwise be read as
+          # octal and abort with "value too great for base".
           case "$BRANCH" in
-            develop) next="${major}.$((minor + 1))" ;;   # MINOR on every dev build
-            main)    next="$((major + 1)).0" ;;          # MAJOR on promotion
+            develop) next="${major}.$((10#$minor + 1))" ;;   # MINOR on every dev build
+            main)    next="$((10#$major + 1)).0" ;;          # MAJOR on promotion
             *)       echo "::error::refusing to version branch $BRANCH"; exit 1 ;;
           esac
           [[ "$next" =~ ^[0-9]+\.[0-9]+$ ]] \
@@ -138,6 +202,9 @@ jobs:
           echo "chart=${next}.0" >> "$GITHUB_OUTPUT"
           echo "\`$latest\` → \`v${next}\`" >> "$GITHUB_STEP_SUMMARY"
 
+      # The tag is pushed before the image is built. If `publish` then fails,
+      # the tag exists with no image behind it: use "Re-run failed jobs" to
+      # recover, since a full re-run aborts on "tag already exists".
       - name: Tag the commit
         run: |
           set -euo pipefail
@@ -151,6 +218,8 @@ jobs:
     name: Build & publish image
     needs: [ version ]
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -222,6 +291,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # make helm-crds and make build-installer run controller-gen and
+      # kustomize, both `go install`ed into bin/. Without Go pinned from
+      # go.mod they would rely on whatever the runner happens to ship.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Package and push Helm chart
         env:
           V: ${{ needs.version.outputs.version }}
@@ -229,8 +306,12 @@ jobs:
         run: |
           set -euo pipefail
           make helm-crds
+          # appVersion must be a tag that is actually published: the chart
+          # defaults image.tag to .Chart.AppVersion, and publish pushes the
+          # unprefixed "2.0", not "v2.0". A v-prefixed appVersion here renders
+          # an image reference that does not exist and ImagePullBackOffs.
           helm package charts/kado-operator \
-            --version "$CHART" --app-version "v$V" --destination dist/
+            --version "$CHART" --app-version "$V" --destination dist/
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
             --username "${{ env.DOCKERHUB_USER }}" --password-stdin
           helm push "dist/kado-operator-${CHART}.tgz" oci://registry-1.docker.io/partofaplan
@@ -238,11 +319,42 @@ jobs:
       - name: Build install manifest
         run: make build-installer IMG=${{ env.IMAGE }}:${{ needs.version.outputs.version }}
 
+      - name: Compose release notes
+        env:
+          V: ${{ needs.version.outputs.version }}
+          CHART: ${{ needs.version.outputs.chart }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          {
+            echo "## Install"
+            echo
+            echo '```bash'
+            echo "helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \\"
+            echo "  --version ${CHART} --namespace kado-operator-system --create-namespace"
+            echo '```'
+            echo
+            echo "Or apply the bundled manifest:"
+            echo
+            echo '```bash'
+            echo "kubectl apply -f https://github.com/${{ github.repository }}/releases/download/v${V}/install.yaml"
+            echo '```'
+            echo
+            echo "## Container image"
+            echo
+            echo '```'
+            echo "${{ env.IMAGE }}:${V}"
+            echo "${{ env.IMAGE }}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Pin the digest for reproducible deployments."
+          } > RELEASE.md
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
           name: v${{ needs.version.outputs.version }}
+          body_path: RELEASE.md
           generate_release_notes: true
           files: |
             dist/install.yaml

@@ -200,8 +200,13 @@ both; `make run` will not catch the difference because it uses your kubeconfig.
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `ci.yml` | pushes and PRs | lint, verify generated files are current, unit + envtest; on `develop`/`main` also assign the version, tag, publish the image, and on `main` publish the release |
-| `integration-test.yml` | push to `develop`/`main`/`release/*`, PRs | ephemeral cluster, install CRDs, build image, run the integration suite |
+| `ci.yml` | pushes and PRs | lint, unit + envtest, generated-code check, integration on an ephemeral cluster; on `develop`/`main` also assign the version, tag, publish the image, and on `main` publish the release |
+
+Everything lives in one workflow on purpose. A workflow cannot declare a
+`needs` dependency on a different workflow, so with integration tests in their
+own file `version` could not wait for them — a merge to `main` could tag and
+publish while they were red. They now sit upstream of `version` in the same
+run.
 
 There is deliberately no tag-triggered release workflow. Tags are pushed by
 `ci.yml` using `GITHUB_TOKEN`, and GitHub suppresses workflow triggers for
