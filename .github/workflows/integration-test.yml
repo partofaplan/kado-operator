@@ -1,0 +1,51 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ develop, main, 'release/**' ]
+  pull_request:
+    branches: [ develop, main ]
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: K3D integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Install k3d itself and let the Makefile create the cluster, so CI takes
+      # exactly the same path as `make test-integration` on a developer laptop.
+      - name: Install k3d
+        run: curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.7.4 bash
+
+      - name: Create K3D cluster
+        run: make k3d-up K3D_CLUSTER=kado-ci
+
+      # The suite runs the manager in-process, so the image is not needed for
+      # the tests themselves. Building and loading it still proves the
+      # Dockerfile works and that the image lands in the cluster.
+      - name: Build and load operator image
+        run: |
+          make docker-build IMG=kado-operator:ci
+          k3d image load kado-operator:ci -c kado-ci
+
+      - name: Run integration tests
+        run: make test-integration K3D_CLUSTER=kado-ci
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get devenvironments -A -o wide || true
+          kubectl describe devenvironments -A || true
+          kubectl get ns
+          kubectl get all -A -l app.kubernetes.io/managed-by=kado-operator || true

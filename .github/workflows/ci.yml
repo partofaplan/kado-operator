@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [ develop, main, 'release/**', 'feature/**', 'hotfix/**' ]
+  pull_request:
+    branches: [ develop, main ]
+
+# A new push to a branch makes the in-flight run for that branch obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.3.0
+          args: --timeout=5m
+
+  generated:
+    name: Generated code is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A stale zz_generated.deepcopy.go or CRD manifest means the cluster gets
+      # a schema that does not match the Go types, so fail loudly here rather
+      # than at apply time.
+      - name: Regenerate manifests and deepcopy
+        run: make manifests generate
+
+      - name: Fail if regeneration changed anything
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "::error::Generated files are out of date. Run 'make manifests generate' and commit the result."
+            git --no-pager diff
+            exit 1
+          fi
+
+  test:
+    name: Unit & envtest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 'make test' provisions the envtest control-plane binaries and sets
+      # KUBEBUILDER_ASSETS; a bare 'go test ./...' would fail without them.
+      - name: Run tests
+        run: make test
+
+      - name: Report coverage
+        run: go tool cover -func=cover.out | tail -1
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cover.out
+
+  build:
+    name: Build image
+    needs: [ lint, test, generated ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build operator image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: kado-operator:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
