@@ -678,19 +678,20 @@ One workflow owns the whole line. It validates every merge request, and on
 `develop` and `main` it additionally assigns the next version, tags the commit,
 and publishes. Jobs: `lint`, `generated`, `test` and `image` on everything;
 then, on a push only, `integration` → `version` → `publish`, followed by
-`verify-picard` on `develop` and `release` on `main`.
+`verify-picard` on `develop`. There is no release job: releases are
+`release.yml`, dispatched deliberately.
 
 ### Decisions that look wrong until you know why
 
 **Integration is a job in `ci.yml`, not a workflow of its own.** A workflow
 cannot declare a `needs` dependency on a *different* workflow. With integration
-tests in their own file, `version` could not wait for them, so a merge to `main`
-could tag, publish and release while integration tests were still running or
-already red. The Definition of Done requires them to pass, so they sit upstream
+tests in their own file, `version` could not wait for them, so a merge could
+tag and publish while integration tests were still running or already red. The Definition of Done requires them to pass, so they sit upstream
 of `version` in the same run.
 
-**There is no `release.yml` triggered by `push: tags: v*`,** for the reason given
-under [Versioning](#two-consequences-worth-knowing).
+**`release.yml` is `workflow_dispatch`, not `push: tags: v*`,** for the reason
+given under [Versioning](#two-consequences-worth-knowing) — and because a
+release is a decision rather than a reaction.
 
 **The `integration` job is `push`-only, and `verify-picard` exists at all.**
 Together these implement

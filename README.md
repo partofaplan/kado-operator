@@ -116,12 +116,12 @@ helm install kado-operator ./charts/kado-operator \
   --namespace kado-operator-system --create-namespace
 ```
 
-To run a specific build — say the current tip of `develop`:
+To run a specific published version:
 
 ```bash
 helm upgrade --install kado-operator ./charts/kado-operator \
   --namespace kado-operator-system --create-namespace \
-  --set image.tag=develop
+  --set image.tag=0.9.1
 ```
 
 Chart values are documented in
@@ -169,11 +169,20 @@ The Dockerfile cross-compiles: its builder stage is pinned to
 `$BUILDPLATFORM`, so a multi-arch build runs the Go toolchain natively once
 per target rather than emulating it under QEMU.
 
-Releases are not cut by hand. Merging an approved merge request from
-`develop` into `main` is the release: CI assigns the next MAJOR, tags the
-commit, publishes the multi-arch image and moves `latest`, pushes the chart to
-the OCI registry, and creates a GitHub release with `install.yaml` and the
-chart archive attached.
+Promoting `develop` into `main` **readies** a release; it does not cut one. On
+merge, CI assigns the next MAJOR, tags the commit, and publishes the multi-arch
+image and `latest`. No chart, no `install.yaml`, no GitHub release.
+
+Cutting a release is a separate, deliberate step — the one a human starts:
+
+```bash
+gh workflow run release.yml -f dry_run=true     # build it all, print the notes, change nothing
+gh workflow run release.yml -f dry_run=false    # publish for real
+```
+
+That moves the RELEASE place, pushes the chart to the OCI registry, and creates
+a GitHub release with `install.yaml`, the chart archive, the CRD and a sample
+environment attached. Versions are never assigned by hand.
 
 Every change reaches `develop` the same way — a feature branch, the
 cluster-free test layers green, then a merge request reviewed by someone other

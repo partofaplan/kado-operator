@@ -326,7 +326,7 @@ both; `make run` will not catch the difference because it uses your kubeconfig.
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `ci.yml` | pull requests into `develop`/`main`, and pushes to those two branches | **On a pull request:** lint, unit + envtest, generated-code check and a Dockerfile build (`linux/arm64` only — the cross-compiled target, since `Unit & envtest` already compiles natively on the same runner) — nothing that touches a cluster. **On a push to `develop`/`main`:** additionally the integration suite on an ephemeral cluster, then assign the version, tag and publish the image; on `develop` also upgrade `picard` and validate it; on `main` publish the release |
+| `ci.yml` | pull requests into `develop`/`main`, and pushes to those two branches | **On a pull request:** lint, unit + envtest, generated-code check and a Dockerfile build (`linux/arm64` only — the cross-compiled target, since `Unit & envtest` already compiles natively on the same runner) — nothing that touches a cluster. **On a push to `develop`/`main`:** additionally the integration suite on an ephemeral cluster, then assign the version, tag and publish the image; on `develop` also upgrade `picard` and validate it. No release is published on any push — that is `release.yml`, dispatched deliberately |
 
 Feature and hotfix branches are covered by the pull request trigger, which
 tests the merge result rather than the branch tip. They are deliberately not in
