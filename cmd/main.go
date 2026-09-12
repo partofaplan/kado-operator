@@ -181,6 +181,10 @@ func main() {
 	if err := (&controller.DevEnvironmentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// Uncached, for reading pods when explaining why a service is not
+		// ready. Going through the manager's cache would start a cluster-wide
+		// pod informer for data this controller only needs on the failure path.
+		APIReader: mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DevEnvironment")
 		os.Exit(1)

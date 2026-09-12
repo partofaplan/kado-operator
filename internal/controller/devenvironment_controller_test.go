@@ -457,3 +457,168 @@ func TestEnvironmentFromLabelsMapsOwnedObjects(t *testing.T) {
 		})
 	}
 }
+
+// crashingPod builds a pod belonging to service in the environment namespace,
+// stuck on reason with an optional previous exit code.
+func crashingPod(service, reason string, exitCode *int32) *corev1.Pod {
+	cs := corev1.ContainerStatus{
+		Name:  service,
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+	}
+	if exitCode != nil {
+		cs.LastTerminationState = corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{ExitCode: *exitCode},
+		}
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      service + "-abc123",
+			Namespace: targetNS,
+			Labels: map[string]string{
+				labelManagedBy:   managerName,
+				labelEnvironment: envName,
+				labelService:     service,
+			},
+		},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{cs}},
+	}
+}
+
+// A container that cannot start must surface as Degraded. Before this, Degraded
+// was hardcoded false whenever the reconciler itself succeeded, so a pod in
+// CrashLoopBackOff was indistinguishable from one still pulling its image.
+func TestReconcileMarksDegradedWhenAContainerCannotStart(t *testing.T) {
+	exit := int32(1)
+	r, c := newReconciler(t,
+		newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+			e.Spec.Services = append(e.Spec.Services, devenvv1alpha1.ServiceSpec{
+				Name: "postgres", Image: "postgres:16-alpine", Port: 5432,
+			})
+		}),
+		crashingPod("postgres", "CrashLoopBackOff", &exit),
+	)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+
+	degraded := meta.FindStatusCondition(env.Status.Conditions, devenvv1alpha1.ConditionDegraded)
+	require.NotNil(t, degraded)
+	assert.Equal(t, metav1.ConditionTrue, degraded.Status)
+	assert.Equal(t, "WorkloadUnhealthy", degraded.Reason)
+	assert.Contains(t, degraded.Message, `service "postgres"`)
+	assert.Contains(t, degraded.Message, "CrashLoopBackOff")
+	assert.Contains(t, degraded.Message, "code 1")
+	assert.Contains(t, degraded.Message, "kubectl logs")
+
+	// Progressing must not simultaneously claim the environment is on its way.
+	assert.False(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionProgressing))
+	assert.False(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionAvailable))
+}
+
+// The inverse, and the reason the waiting reason is allow-listed: a pod that is
+// merely still starting must not be reported as degraded, or the condition
+// would fire on every normal provision.
+func TestReconcileDoesNotMarkDegradedWhileContainersAreStillStarting(t *testing.T) {
+	r, c := newReconciler(t, newEnv(), crashingPod("redis", "ContainerCreating", nil))
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+
+	degraded := meta.FindStatusCondition(env.Status.Conditions, devenvv1alpha1.ConditionDegraded)
+	require.NotNil(t, degraded)
+	assert.Equal(t, metav1.ConditionFalse, degraded.Status)
+	assert.Equal(t, "ReconcileSucceeded", degraded.Reason)
+	assert.True(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionProgressing))
+}
+
+func TestReconcileReportsImagePullAndSchedulingFailures(t *testing.T) {
+	t.Run("image pull carries the API server's own message", func(t *testing.T) {
+		pod := crashingPod("redis", "ImagePullBackOff", nil)
+		pod.Status.ContainerStatuses[0].State.Waiting.Message = `pull access denied for redis`
+		r, c := newReconciler(t, newEnv(), pod)
+		reconcile(t, r)
+
+		var env devenvv1alpha1.DevEnvironment
+		require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+		d := meta.FindStatusCondition(env.Status.Conditions, devenvv1alpha1.ConditionDegraded)
+		require.NotNil(t, d)
+		assert.Equal(t, metav1.ConditionTrue, d.Status)
+		assert.Contains(t, d.Message, "ImagePullBackOff: pull access denied for redis")
+	})
+
+	t.Run("an unschedulable pod outranks container state", func(t *testing.T) {
+		pod := crashingPod("redis", "ContainerCreating", nil)
+		pod.Status.Conditions = []corev1.PodCondition{{
+			Type:    corev1.PodScheduled,
+			Status:  corev1.ConditionFalse,
+			Reason:  corev1.PodReasonUnschedulable,
+			Message: "0/3 nodes are available: insufficient cpu",
+		}}
+		r, c := newReconciler(t, newEnv(), pod)
+		reconcile(t, r)
+
+		var env devenvv1alpha1.DevEnvironment
+		require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+		d := meta.FindStatusCondition(env.Status.Conditions, devenvv1alpha1.ConditionDegraded)
+		require.NotNil(t, d)
+		assert.Equal(t, metav1.ConditionTrue, d.Status)
+		assert.Contains(t, d.Message, "Unschedulable: 0/3 nodes are available: insufficient cpu")
+	})
+}
+
+// A terminating pod is on its way out by design — reporting it would make every
+// rollout look degraded.
+func TestWorkloadProblemsIgnoresTerminatingPods(t *testing.T) {
+	exit := int32(1)
+	pod := crashingPod("redis", "CrashLoopBackOff", &exit)
+	now := metav1.Now()
+	pod.DeletionTimestamp = &now
+	pod.Finalizers = []string{"kubernetes.io/test"} // fake client requires one to accept a deletionTimestamp
+
+	r, _ := newReconciler(t, newEnv(), pod)
+	assert.Empty(t, r.workloadProblems(context.Background(), newEnv(), targetNS))
+}
+
+// Once everything is ready the pods are not consulted at all, so a stale
+// crashing pod from a previous revision cannot flip a healthy environment.
+func TestReconcileDoesNotReportProblemsOnceAllServicesAreReady(t *testing.T) {
+	exit := int32(1)
+	r, c := newReconciler(t, newEnv(), crashingPod("redis", "CrashLoopBackOff", &exit))
+	ctx := context.Background()
+	reconcile(t, r)
+
+	var d appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &d))
+	d.Status.ReadyReplicas = 1
+	require.NoError(t, c.Status().Update(ctx, &d))
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(ctx, request().NamespacedName, &env))
+	assert.Equal(t, devenvv1alpha1.PhaseReady, env.Status.Phase)
+	assert.False(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded))
+}
+
+// Without a requeue nothing brings the controller back once a Deployment's
+// status settles, so a container that starts crashing after the last reconcile
+// would never be reported. Verified on a live cluster before this was added:
+// the operator logged nothing while a pod restarted six times.
+func TestReconcileRequeuesWhileServicesAreNotReady(t *testing.T) {
+	r, c := newReconciler(t, newEnv())
+	ctx := context.Background()
+
+	res, err := r.Reconcile(ctx, request())
+	require.NoError(t, err)
+	assert.Equal(t, notReadyRequeue, res.RequeueAfter, "an unready environment must schedule its own re-examination")
+
+	var d appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &d))
+	d.Status.ReadyReplicas = 1
+	require.NoError(t, c.Status().Update(ctx, &d))
+
+	res, err = r.Reconcile(ctx, request())
+	require.NoError(t, err)
+	assert.Zero(t, res.RequeueAfter, "a ready environment must stop requeuing")
+}

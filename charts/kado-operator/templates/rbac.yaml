@@ -20,6 +20,11 @@ rules:
   - apiGroups: ["apps"]
     resources: [deployments]
     verbs: [create, delete, get, list, patch, update, watch]
+  # Read-only, and no watch: pods are read on demand to explain why a service
+  # is not ready, never written and never cached.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
   - apiGroups: ["devenv.aviture.dev"]
     resources: [devenvironments]
     verbs: [create, delete, get, list, patch, update, watch]

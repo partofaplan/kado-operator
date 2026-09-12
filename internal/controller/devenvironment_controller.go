@@ -22,6 +22,8 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -60,6 +62,10 @@ const (
 
 	managerName = "kado-operator"
 
+	// notReadyRequeue is how often an environment that is not fully ready is
+	// re-examined, so workload health is noticed without watching every pod.
+	notReadyRequeue = 30 * time.Second
+
 	// sharedVolumeName is the pod volume backed by the environment's PVC.
 	sharedVolumeName = "workspace"
 )
@@ -68,6 +74,26 @@ const (
 type DevEnvironmentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// APIReader reads straight from the API server, bypassing the manager's
+	// cache. Optional: when nil, Client is used, which is what the fake-client
+	// tests rely on.
+	APIReader client.Reader
+}
+
+// reader returns the uncached reader when one is wired, falling back to the
+// cached Client.
+//
+// Pods are deliberately read through this rather than through the cache.
+// Caching them would start a cluster-wide pod informer and hold every pod in
+// the cluster in memory, and this controller needs pods only to explain a
+// failure after the fact — never to drive reconciliation. Deployment events
+// already requeue us when readiness changes.
+func (r *DevEnvironmentReconciler) reader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // +kubebuilder:rbac:groups=devenv.aviture.dev,resources=devenvironments,verbs=get;list;watch;create;update;patch;delete
@@ -76,6 +102,9 @@ type DevEnvironmentReconciler struct {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps;secrets;persistentvolumeclaims;services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// Pods are read, never written: they are how the operator explains why a
+// service is not ready. No watch verb — see reader() for why they are not cached.
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 
 // Reconcile drives the cluster toward the DevEnvironment spec: a dedicated
 // namespace holding a config map, copies of any referenced secrets, an
@@ -115,6 +144,22 @@ func (r *DevEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	if err := r.setProvisioned(ctx, &env, ready); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Requeue while the environment is not fully ready. Nothing else will
+	// bring us back: the Deployment watch fires on Deployment *status*
+	// changes, and once a pod settles into CrashLoopBackOff that status stops
+	// changing — ReadyReplicas is already 0 and the conditions are stable. So
+	// a container that starts failing after the last reconcile would never be
+	// noticed, and Degraded would never be set. Verified against a live
+	// cluster: without this the operator logged nothing after startup while a
+	// pod restarted six times.
+	//
+	// Watching Pods instead would be event-driven, but it would also make
+	// controller-runtime cache every pod in the cluster for data this
+	// controller reads only on the failure path.
+	if ready < int32(len(env.Spec.Services)) {
+		return ctrl.Result{RequeueAfter: notReadyRequeue}, nil
 	}
 	return ctrl.Result{}, nil
 }
@@ -475,10 +520,116 @@ func (r *DevEnvironmentReconciler) setProvisioned(ctx context.Context, env *deve
 
 	message := fmt.Sprintf("%d/%d services ready", ready, total)
 	r.setCondition(env, devenvv1alpha1.ConditionAvailable, boolStatus(allReady), reasonFor(allReady, "EnvironmentReady", "ServicesNotReady"), message)
-	r.setCondition(env, devenvv1alpha1.ConditionProgressing, boolStatus(!allReady), reasonFor(!allReady, "Provisioning", "Provisioned"), message)
-	r.setCondition(env, devenvv1alpha1.ConditionDegraded, metav1.ConditionFalse, "ReconcileSucceeded", "Reconciliation completed without error")
+
+	// Degraded used to be hardcoded false whenever the reconciler itself
+	// succeeded. That conflates two different questions: "did I manage to
+	// create the resources" and "is the environment actually working". A
+	// service whose container cannot start — a missing required env var, a
+	// bad image, an unschedulable pod — reports exactly the same zero ready
+	// replicas as one still pulling, so the environment sat in Provisioning
+	// with Degraded=false indefinitely and nothing said what was wrong.
+	var problems []string
+	if !allReady {
+		problems = r.workloadProblems(ctx, env, env.TargetNamespace())
+	}
+
+	if len(problems) > 0 {
+		detail := strings.Join(problems, "; ")
+		// Not Progressing: a container in CrashLoopBackOff is not on its way
+		// to Ready, and saying otherwise is the same lie in a second field.
+		r.setCondition(env, devenvv1alpha1.ConditionProgressing, metav1.ConditionFalse, "WorkloadUnhealthy", detail)
+		r.setCondition(env, devenvv1alpha1.ConditionDegraded, metav1.ConditionTrue, "WorkloadUnhealthy", detail)
+	} else {
+		r.setCondition(env, devenvv1alpha1.ConditionProgressing, boolStatus(!allReady), reasonFor(!allReady, "Provisioning", "Provisioned"), message)
+		r.setCondition(env, devenvv1alpha1.ConditionDegraded, metav1.ConditionFalse, "ReconcileSucceeded", "Reconciliation completed without error")
+	}
 
 	return r.patchStatus(ctx, env)
+}
+
+// blockingWaitReasons are container waiting reasons that will not clear on
+// their own. Anything absent from this set — ContainerCreating,
+// PodInitializing — is a pod that is simply still coming up, and reporting it
+// as degraded would make the condition meaningless during a normal start.
+var blockingWaitReasons = map[string]bool{
+	"CrashLoopBackOff":           true,
+	"ImagePullBackOff":           true,
+	"ErrImagePull":               true,
+	"InvalidImageName":           true,
+	"CreateContainerConfigError": true,
+	"CreateContainerError":       true,
+	"RunContainerError":          true,
+}
+
+// workloadProblems returns one human-readable problem per service that cannot
+// start. It never fails the reconcile: the resources are already correct, and
+// a listing error here costs only detail.
+func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *devenvv1alpha1.DevEnvironment, ns string) []string {
+	var pods corev1.PodList
+	if err := r.reader().List(ctx, &pods,
+		client.InNamespace(ns),
+		client.MatchingLabels{labelManagedBy: managerName, labelEnvironment: env.Name},
+	); err != nil {
+		logf.FromContext(ctx).Error(err, "listing pods for status detail", "namespace", ns)
+		return nil
+	}
+
+	// One entry per service: every replica of a service fails the same way, and
+	// repeating it per pod would bury the message.
+	byService := map[string]string{}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if !pod.DeletionTimestamp.IsZero() {
+			continue
+		}
+		svc := pod.Labels[labelService]
+		if svc == "" || byService[svc] != "" {
+			continue
+		}
+		if detail := podProblem(pod); detail != "" {
+			byService[svc] = detail
+		}
+	}
+
+	out := make([]string, 0, len(byService))
+	for svc, detail := range byService {
+		out = append(out, fmt.Sprintf("service %q: %s", svc, detail))
+	}
+	// Sorted so the condition message is stable across reconciles; an unstable
+	// message would rewrite lastTransitionTime on every pass.
+	slices.Sort(out)
+	return out
+}
+
+// podProblem describes why a pod cannot run, or returns "" if it is healthy or
+// merely still starting.
+func podProblem(pod *corev1.Pod) string {
+	for i := range pod.Status.Conditions {
+		c := &pod.Status.Conditions[i]
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
+			return fmt.Sprintf("Unschedulable: %s", c.Message)
+		}
+	}
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		w := cs.State.Waiting
+		if w == nil || !blockingWaitReasons[w.Reason] {
+			continue
+		}
+		// CrashLoopBackOff's own waiting message is only "back-off 5m0s
+		// restarting failed container", which says nothing about the cause.
+		// The previous termination carries the exit code, and the logs carry
+		// the rest — so point at them.
+		if t := cs.LastTerminationState.Terminated; t != nil && w.Reason == "CrashLoopBackOff" {
+			return fmt.Sprintf("%s (container %q last exited with code %d); see `kubectl logs -n %s %s`",
+				w.Reason, cs.Name, t.ExitCode, pod.Namespace, pod.Name)
+		}
+		if w.Message != "" {
+			return fmt.Sprintf("%s: %s", w.Reason, w.Message)
+		}
+		return w.Reason
+	}
+	return ""
 }
 
 func (r *DevEnvironmentReconciler) setFailed(ctx context.Context, env *devenvv1alpha1.DevEnvironment, cause error) error {
