@@ -186,6 +186,10 @@ type DevEnvironmentStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Namespace",type=string,JSONPath=`.status.namespace`
+// Degraded is surfaced in the default output on purpose: the symptom that
+// prompted it was an environment sitting at "Provisioning 1 2" with the reason
+// reachable only through `describe`.
+// +kubebuilder:printcolumn:name="Degraded",type=string,JSONPath=`.status.conditions[?(@.type=="Degraded")].status`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.readyServices`
 // +kubebuilder:printcolumn:name="Services",type=string,JSONPath=`.status.totalServices`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
