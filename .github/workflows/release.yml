@@ -28,23 +28,6 @@ env:
   IMAGE: docker.io/partofaplan/kado-operator
   # Not a secret: this namespace is public and already appears in IMAGE.
   DOCKERHUB_USER: partofaplan
-  # NOT Docker Hub. `helm push chart.tgz oci://host/ns` lands the chart at
-  # host/ns/<chart name>:<version>, and the chart is named kado-operator — so
-  # on Docker Hub it would resolve to the exact repository and tag the image
-  # was pushed to minutes earlier in this same job, replacing the image
-  # manifest. Every user installing the released chart would then get an
-  # ImagePullBackOff, because the chart's own appVersion points at that tag.
-  #
-  # This did not collide under the old two-place scheme only by accident: the
-  # chart carried an invented `.0` patch (image `0.2`, chart `0.2.0`), so the
-  # tags differed. Three places are already valid SemVer2, so that suffix went
-  # away and the collision appeared.
-  #
-  # Docker Hub allows only two path components, so there is no sibling path to
-  # move to, and renaming the chart is not an option either — .Chart.Name drives
-  # kado-operator.fullname and would rename every resource the chart creates.
-  # GHCR supports deep paths, so the chart goes there.
-  CHART_REPO: oci://ghcr.io/partofaplan/charts
 
 jobs:
   release:
@@ -52,7 +35,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write   # pushing the chart to GHCR
     steps:
       - name: Refuse to release from anywhere but main
         run: |
@@ -224,18 +206,14 @@ jobs:
             echo
             echo "Everything below is attached to this release. Pick one path."
             echo
-            echo "### Helm (any cluster)"
+            echo "### Helm"
+            echo
+            echo "Helm installs straight from a URL, so the chart attached to"
+            echo "this release needs no registry and no download step:"
             echo
             echo '```bash'
-            echo "helm install kado-operator ${CHART_REPO}/kado-operator \\"
-            echo "  --version ${V} \\"
-            echo "  --namespace kado-operator-system --create-namespace"
-            echo '```'
-            echo
-            echo "Or from the chart attached below, with no registry at all:"
-            echo
-            echo '```bash'
-            echo "helm install kado-operator ./kado-operator-${V}.tgz \\"
+            echo "helm install kado-operator \\"
+            echo "  https://github.com/${GITHUB_REPOSITORY}/releases/download/v${V}/kado-operator-${V}.tgz \\"
             echo "  --namespace kado-operator-system --create-namespace"
             echo '```'
             echo
@@ -266,7 +244,7 @@ jobs:
             echo "| File | What it is |"
             echo "| --- | --- |"
             echo "| \`install.yaml\` | CRD, RBAC and the operator Deployment in one manifest |"
-            echo "| \`kado-operator-${V}.tgz\` | The Helm chart |"
+            echo "| \`kado-operator-${V}.tgz\` | The Helm chart — \`helm install\` takes its URL directly |"
             echo "| \`crd.yaml\` | The \`DevEnvironment\` CRD on its own |"
             echo "| \`devenvironment-sample.yaml\` | A sample environment to apply |"
             echo
@@ -286,21 +264,6 @@ jobs:
             sed -n '1,80p' dist/RELEASE_NOTES.md
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      # Runs before the release is created, so a failure here costs nothing:
-      # no tag has been pushed yet, and a re-dispatch recomputes the same
-      # version. This is also the first time the chart push has ever run — the
-      # old release job never fired, because no release was ever cut.
-      - name: Push the chart to the OCI registry
-        if: steps.mode.outputs.publish == 'true'
-        env:
-          V: ${{ steps.ver.outputs.version }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          echo "$GH_TOKEN" | helm registry login ghcr.io \
-            --username "${GITHUB_ACTOR}" --password-stdin
-          helm push "dist/kado-operator-${V}.tgz" "${CHART_REPO}"
 
       # LAST, and it creates the tag itself rather than a separate `git push`
       # step earlier.

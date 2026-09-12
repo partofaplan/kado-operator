@@ -109,10 +109,11 @@ gh workflow run release.yml -f dry_run=false   # publish for real
 and prints the release notes it would publish, without tagging, pushing or
 releasing anything.
 
-The release publishes the multi-arch image, pushes the Helm chart to the OCI
-registry, and creates a GitHub release with `install.yaml`, the chart tarball,
-the CRD on its own and a sample environment attached — everything a user needs
-to install into a cluster of their own. Notes are generated from the pull
+The release publishes the multi-arch image and creates a GitHub release with
+`install.yaml`, the chart tarball, the CRD on its own and a sample environment
+attached — everything a user needs to install into a cluster of their own.
+There is no chart registry: `helm install` takes the attached chart's URL
+directly. Notes are generated from the pull
 requests merged since the previous **release** tag, not the previous tag, since
 every merge cuts one.
 

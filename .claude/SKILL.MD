@@ -409,7 +409,7 @@ cluster of their own:
 | Artifact | What it is |
 | --- | --- |
 | `install.yaml` | CRD, RBAC and the Deployment in one manifest, for `kubectl apply` |
-| `kado-operator-<version>.tgz` | The Helm chart, also pushed to the OCI registry |
+| `kado-operator-<version>.tgz` | The Helm chart. `helm install` takes its URL directly, so there is no chart registry |
 | `crd.yaml` | The `DevEnvironment` CRD on its own |
 | `devenvironment-sample.yaml` | A sample environment to apply |
 | the image | version-pinned and by digest, both named in the notes |
@@ -842,26 +842,23 @@ time, per [Versioning](#two-consequences-worth-knowing).
 - Service type `ClusterIP` by default; anything else is opt-in.
 - Guard optional CRD-dependent resources (e.g. `ServiceMonitor`) behind a flag.
 
-### Install the published chart (OCI)
+### Install the published chart
 
-The chart is published to **GHCR**, not Docker Hub, and this is not cosmetic.
-`helm push chart.tgz oci://host/ns` lands the chart at
-`host/ns/<chart name>:<version>`. On Docker Hub that resolves to
-`partofaplan/kado-operator:<version>` — the exact repository and tag the image
-uses — so the chart would replace the image manifest and every install would
-then `ImagePullBackOff` on the chart's own `appVersion`. Docker Hub allows only
-two path components, so there is no sibling path to move to, and renaming the
-chart would rename every resource it creates, because `.Chart.Name` drives
-`kado-operator.fullname`. GHCR supports deep paths.
+The chart is attached to each GitHub release, and Helm installs straight from a
+URL — so there is no chart registry to publish to, authenticate against or keep
+in step with the image:
 
 ```bash
-helm install kado-operator oci://ghcr.io/partofaplan/charts/kado-operator \
-  --version 1.0.0 \
-  --namespace kado-operator-system \
-  --create-namespace
+helm install kado-operator \
+  https://github.com/partofaplan/kado-operator/releases/download/v1.0.0/kado-operator-1.0.0.tgz \
+  --namespace kado-operator-system --create-namespace
 ```
 
-The image stays on Docker Hub. Only the chart moved.
+Publishing the chart to an OCI registry was considered and dropped. On Docker
+Hub `helm push` would have landed it at `partofaplan/kado-operator:<version>` —
+the same repository and tag as the image, replacing it — and the alternatives
+were a second registry or renaming the chart, which would rename every resource
+it creates. The release asset does the same job with none of that.
 
 ### Install from a local checkout
 

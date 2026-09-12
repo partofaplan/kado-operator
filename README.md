@@ -105,7 +105,8 @@ digest it published in its job summary.
 > the `latest` image, which moves on every publish.
 
 ```bash
-helm install kado-operator oci://ghcr.io/partofaplan/charts/kado-operator \
+helm install kado-operator \
+  https://github.com/partofaplan/kado-operator/releases/download/v1.0.0/kado-operator-1.0.0.tgz \
   --namespace kado-operator-system --create-namespace
 ```
 
@@ -181,9 +182,9 @@ gh workflow run release.yml -f dry_run=true     # build it all, print the notes,
 gh workflow run release.yml -f dry_run=false    # publish for real
 ```
 
-That moves the RELEASE place, pushes the chart to the OCI registry, and creates
-a GitHub release with `install.yaml`, the chart archive, the CRD and a sample
-environment attached. Versions are never assigned by hand.
+That moves the RELEASE place and creates a GitHub release with `install.yaml`,
+the chart archive, the CRD and a sample environment attached. Versions are
+never assigned by hand.
 
 Every change reaches `develop` the same way — a feature branch, the
 cluster-free test layers green, then a merge request reviewed by someone other
