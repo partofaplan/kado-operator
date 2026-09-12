@@ -165,17 +165,26 @@ jobs:
             rollback_flag=--atomic
           fi
 
-          # `latest` moves, and the chart defaults pullPolicy to IfNotPresent.
-          # Deploying it twice would render a byte-identical pod spec, so Helm
-          # would change nothing, no pod would roll, `rollout status` would
-          # return instantly and this job would report success while still
-          # running the OLD image. The preflight cannot catch that — it only
-          # proves the tag exists, and `latest` always does. Force a pull for
-          # any moving tag; pinned MAJOR.MINOR tags never move, so they keep
-          # the cheaper default.
+          # `latest` moves, so deploying it twice renders a byte-identical pod
+          # spec. Helm writes a new revision, the Deployment's .spec.template
+          # is unchanged, so there is no new pod-template-hash, no new
+          # ReplicaSet and no pod restart: `rollout status` returns instantly
+          # and this job reports success while the OLD image keeps running.
+          # The preflight cannot catch it — it only proves the tag exists, and
+          # `latest` always does.
+          #
+          # Two settings are needed, and each is insufficient alone.
+          # pullPolicy=Always is what makes a *replacement* pod fetch the new
+          # digest instead of reusing the node's cached layer — but kubelet
+          # only reads it when a container starts, and nothing starts here. So
+          # also vary one pod annotation, which changes .spec.template and
+          # forces a genuine rollout. Pinned MAJOR.MINOR tags never move, so
+          # they need neither and keep the cheaper default.
           pull_policy=IfNotPresent
+          roll=()
           if [ "$TAG" = "latest" ]; then
             pull_policy=Always
+            roll+=( --set-string podAnnotations.deployedAt="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" )
           fi
 
           args=(
@@ -185,6 +194,7 @@ jobs:
             --set image.repository="$IMAGE"
             --set image.tag="$TAG"
             --set image.pullPolicy="$pull_policy"
+            "${roll[@]+"${roll[@]}"}"
             "$rollback_flag" --timeout 5m
           )
           if [ "$DRY" = "true" ]; then

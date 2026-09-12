@@ -23,6 +23,15 @@ All notable changes to this project are documented here. The format follows
 - The Dockerfile build moved out of the `integration` job into its own
   parallel `image` job with a layer cache. It consumed ~99s of the critical
   path where nothing used its output.
+- `deploy.yml` handles moving tags correctly. Deploying `latest` twice used to
+  render a byte-identical pod spec, so Helm wrote a new revision but the
+  Deployment's `.spec.template` was unchanged: no new ReplicaSet, no pod
+  restart, `rollout status` returned instantly and the job reported success
+  while the old image kept running. It now sets `image.pullPolicy=Always` and
+  varies a pod annotation, which are each necessary and neither sufficient —
+  the annotation forces a real rollout, and `Always` makes the replacement pod
+  fetch the new digest rather than reuse the node's cached layer. Its default
+  input also moves from `develop` (no longer published) to `latest`.
 - CI caches `bin/` under a per-job key, so `controller-gen`, `kustomize` and
   the envtest control-plane binaries are no longer re-downloaded in every job
   of every run.
