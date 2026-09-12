@@ -84,12 +84,46 @@ gh pr create --base develop --fill
 /code-review <pr-number>          # a DIFFERENT agent evaluates it
 # merge only on APPROVE — the merge cuts the next MINOR (v1.2.3 -> v1.2.4)
 
-# cut a release: promote develop to main, reviewed the same way
+# promote develop to main, reviewed the same way. This READIES a release; it
+# does not cut one. On merge, CI cuts the next MAJOR (v1.2.4 -> v1.3.0) and
+# publishes an image — no chart, no install.yaml, no GitHub release.
 gh pr create --base main --head develop --title "Release: promote develop to main" --fill
-# on approval and merge, CI cuts the next MAJOR and publishes everything
 
-# then bring main back into develop (this itself cuts MAJOR.1)
+# then bring main back into develop (that merge cuts the next MINOR)
 ```
+
+## Cutting a release
+
+Promoting readies work; cutting a release ships it. Releases move the RELEASE
+place and are the one step a human starts — a `workflow_dispatch` on
+`release.yml`, from `main` only:
+
+```bash
+gh workflow run release.yml -f dry_run=true    # build everything, print the notes, change nothing
+gh workflow run release.yml -f dry_run=false   # publish for real
+```
+
+`dry_run` defaults to **true**. Run it that way first: it builds every artifact
+and prints the release notes it would publish, without tagging, pushing or
+releasing anything.
+
+The release publishes the multi-arch image, pushes the Helm chart to the OCI
+registry, and creates a GitHub release with `install.yaml`, the chart tarball,
+the CRD on its own and a sample environment attached — everything a user needs
+to install into a cluster of their own. Notes are generated from the pull
+requests merged since the previous **release** tag, not the previous tag, since
+every merge cuts one.
+
+Two ordering properties worth knowing, because both cost a release number if
+they are ever changed back:
+
+- The version is tagged **last**, by the release-creation step itself. Tagging
+  earlier meant a failed chart push left the number burned — a re-dispatch
+  would compute the next release and the tag would stand with nothing behind
+  it.
+- The image and chart are pushed before that tag exists. A failure after them
+  is recoverable: a re-dispatch recomputes the same version and overwrites both
+  with identical content. Repeating a push beats burning a number.
 
 ## The local loop
 

@@ -20,7 +20,14 @@ case "$kind" in
   *) echo "usage: $0 <minor|major|release|last-release>" >&2; exit 2 ;;
 esac
 
-tags=$(git tag --list 'v*' || true)
+# No `|| true` on the git call. Swallowing a git failure — run outside a repo,
+# or in a clone whose tags were not fetched — would look exactly like "no tags
+# exist", restart numbering at 0.0.1 and move every version backwards. That is
+# the outcome the malformed-tag guard below exists to prevent, reached by a
+# different door.
+git rev-parse --git-dir >/dev/null 2>&1 \
+  || { echo "::error::not a git repository; refusing to guess a version" >&2; exit 1; }
+tags=$(git tag --list 'v*')
 
 # A release tag is one where both MAJOR and MINOR are zero. That is what makes
 # "since the last release" answerable without a separate marker.
@@ -52,12 +59,20 @@ else
 fi
 
 IFS=. read -r rel maj min <<<"$latest"
-# 10# forces base 10: a tag like v1.08.0 would otherwise be read as octal and
-# abort with "value too great for base".
+
+# Every component goes through 10#, not just the one being incremented. Two
+# reasons: a tag like v1.08.0 would otherwise be read as octal and abort with
+# "value too great for base"; and passing an un-incremented component through
+# verbatim would propagate its leading zero into the new version, producing
+# something like 1.08.1 — which Helm rejects, because SemVer2 forbids a leading
+# zero in a numeric identifier, and `helm package --version` would fail at the
+# worst possible moment.
+rel=$((10#$rel)); maj=$((10#$maj)); min=$((10#$min))
+
 case "$kind" in
-  minor)   next="${rel}.${maj}.$((10#$min + 1))" ;;
-  major)   next="${rel}.$((10#$maj + 1)).0" ;;
-  release) next="$((10#$rel + 1)).0.0" ;;
+  minor)   next="${rel}.${maj}.$((min + 1))" ;;
+  major)   next="${rel}.$((maj + 1)).0" ;;
+  release) next="$((rel + 1)).0.0" ;;
 esac
 
 [[ "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \

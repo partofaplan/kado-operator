@@ -66,6 +66,15 @@ jobs:
           set -euo pipefail
           next=$(./hack/next-version.sh release)
           prev=$(./hack/next-version.sh last-release)
+          # On the FIRST release there is no vR.0.0 to measure from. Leaving
+          # previous_tag_name unset would make GitHub default to the previous
+          # TAG — which is the last merge, since every merge cuts one — and the
+          # release notes would describe a single pull request instead of the
+          # whole history. Fall back to the earliest tag in the repo.
+          if [ -z "$prev" ]; then
+            prev=$(git tag --list 'v*' | sort -V | head -n1 || true)
+            [ -n "$prev" ] && echo "no previous release; measuring notes from the earliest tag ${prev}"
+          fi
           echo "version=${next}" >> "$GITHUB_OUTPUT"
           echo "previous=${prev}" >> "$GITHUB_OUTPUT"
           {
@@ -73,7 +82,7 @@ jobs:
             echo
             echo "| | |"
             echo "| --- | --- |"
-            echo "| previous release | \`${prev:-none — this is the first}\` |"
+            echo "| notes measured from | \`${prev:-the start of the repository}\` |"
             echo "| commit | \`${GITHUB_SHA:0:7}\` |"
             echo "| dry run | \`${{ inputs.dry_run }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -98,13 +107,19 @@ jobs:
 
       # Rendered so a broken chart fails here rather than in a user's cluster,
       # and so the log shows exactly what the release ships.
+      # --show-only, not a grep across the whole render. Helm sorts the CRD
+      # ahead of the Deployment, and the CRD's own OpenAPI schema contains a
+      # property literally named `image:` — so grepping the full output and
+      # taking the first match picked up the schema line and this gate failed
+      # 100% of the time, on both Helm 3 and 4.
       - name: Verify the packaged chart resolves the published image tag
         env:
           V: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
           rendered=$(helm template kado-operator "dist/kado-operator-${V}.tgz" \
-            --namespace kado-operator-system | grep -E '^\s+image:' | head -1)
+            --namespace kado-operator-system \
+            --show-only templates/deployment.yaml | grep -E '^[[:space:]]+image: ')
           echo "chart renders:${rendered}"
           echo "$rendered" | grep -q "${IMAGE}:${V}" \
             || { echo "::error::packaged chart does not reference ${IMAGE}:${V}"; exit 1; }
@@ -135,6 +150,7 @@ jobs:
             ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
             ${{ env.IMAGE }}:latest
           cache-from: type=gha,scope=publish
+          cache-to: type=gha,mode=max,scope=publish
 
       # Notes come from the PRs merged since the PREVIOUS RELEASE, not since
       # the previous tag. Every merge into develop or main cuts a tag, so the
@@ -214,7 +230,7 @@ jobs:
           } > dist/RELEASE_NOTES.md
           echo "--- final notes ---"; cat dist/RELEASE_NOTES.md
 
-      - name: Dry run stops here
+      - name: Dry run summary
         if: ${{ inputs.dry_run }}
         run: |
           {
@@ -224,19 +240,6 @@ jobs:
             sed -n '1,80p' dist/RELEASE_NOTES.md
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      # Tagged only once every artifact above has been built successfully, so a
-      # failed package cannot burn a release number.
-      - name: Tag the release
-        if: ${{ !inputs.dry_run }}
-        env:
-          V: ${{ steps.ver.outputs.version }}
-        run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${V}" -m "Release v${V}"
-          git push origin "v${V}"
 
       - name: Push the chart to the OCI registry
         if: ${{ !inputs.dry_run }}
@@ -248,11 +251,26 @@ jobs:
             --username "${DOCKERHUB_USER}" --password-stdin
           helm push "dist/kado-operator-${V}.tgz" "${CHART_REPO}"
 
-      - name: Create the GitHub release
+      # LAST, and it creates the tag itself rather than a separate `git push`
+      # step earlier.
+      #
+      # The tag is what next-version.sh counts from, so pushing it before the
+      # chart and the release meant a failure in either left the number burned:
+      # a re-dispatch would compute the NEXT release, and the tag would stand
+      # with nothing behind it. Creating it here, via the releases API at the
+      # same moment the release appears, shrinks that window to a single step.
+      #
+      # What can still be left behind on a failure after this point: the image
+      # and the chart are already on Docker Hub. A re-dispatch recomputes the
+      # same version (no git tag was made) and overwrites both with identical
+      # content, which is safe. That is the deliberate trade — repeating a push
+      # beats burning a number.
+      - name: Create the GitHub release and its tag
         if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: v${{ steps.ver.outputs.version }}
           body_path: dist/RELEASE_NOTES.md
           files: |

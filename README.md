@@ -71,7 +71,7 @@ Two tags are published, and only two:
 | Tag | Points at | Moves |
 | --- | --- | --- |
 | `RELEASE.MAJOR.MINOR` (e.g. `1.2.3`) | one exact build, forever | never |
-| `latest` | the most recently published version | every merge to `develop` or `main` |
+| `latest` | the most recently published version | every merge to `develop` or `main`, and every release |
 
 Because versions only ever increase, `latest` is always the newest release on
 either branch — including development builds. It is a convenience for "give me
@@ -89,7 +89,7 @@ release notes, because no place in the version number signals them.
 
 ```bash
 docker pull partofaplan/kado-operator:latest    # newest published build
-docker pull partofaplan/kado-operator:0.4       # one specific release, pinned
+docker pull partofaplan/kado-operator:1.2.3     # one specific build, pinned
 ```
 
 For anything reproducible — a pinned deployment, a bug report, a rollback — use
