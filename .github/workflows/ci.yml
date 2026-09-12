@@ -594,7 +594,15 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "${TEST_ENV:-}" ] || { echo "no test environment was created"; exit 0; }
-          kubectl --context "$CTX" -n default delete devenvironment "$TEST_ENV" --ignore-not-found --timeout=180s
+          # Unguarded, this aborts the step under `set -e` the moment the
+          # delete times out — which is exactly what happens when the
+          # DevEnvironment is stuck on the operator's own finalizer, i.e. when
+          # the reconciler is broken, i.e. when this job fires. The step would
+          # die here with no evidence and no ::error:: annotation. Falling
+          # through instead lets the namespace check below fire the evidence
+          # block and exit 1 properly.
+          kubectl --context "$CTX" -n default delete devenvironment "$TEST_ENV" --ignore-not-found --timeout=180s \
+            || echo "delete did not complete in 180s; collecting evidence below"
           for i in $(seq 1 40); do
             kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1 || break
             sleep 3

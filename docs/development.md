@@ -167,7 +167,8 @@ take and catches migration failures a clean install hides. Only the test
 `DevEnvironment` is temporary: it is created, asserted against, and deleted.
 
 Not *every* merge, despite the name: `verify-picard` depends on `version` and
-`publish`, so it is skipped whenever either is skipped or cancelled — including
+`publish`, so it is skipped whenever either is skipped, fails or is cancelled —
+including
 when three merges land in quick succession and the `version-assign` concurrency
 group cancels the middle run. That commit gets no version, no image and no
 validation.
