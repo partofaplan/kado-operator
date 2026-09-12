@@ -45,6 +45,27 @@ jobs:
             exit 1
           fi
 
+      # `gh workflow run -f dry_run=false` sends the STRING "false" over the
+      # REST API, not a boolean — `type: boolean` only makes it a real boolean
+      # when dispatched from the web UI. In GitHub expressions ANY non-empty
+      # string is truthy, so `!inputs.dry_run` evaluates to false for "false":
+      # every publish step would skip and a real release would quietly do
+      # nothing while reporting success.
+      #
+      # Normalised once here, and everything gates on this output. It fails
+      # SAFE: only an explicit false publishes, so an empty, misspelled or
+      # unexpected value is treated as a dry run rather than shipping.
+      - name: Decide whether to publish
+        id: mode
+        run: |
+          set -euo pipefail
+          case "${{ inputs.dry_run }}" in
+            false|False|FALSE) publish=true ;;
+            *)                 publish=false ;;
+          esac
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          echo "dry_run input = '${{ inputs.dry_run }}' -> publish=${publish}"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # tags are the source of truth; we need all of them
@@ -84,7 +105,7 @@ jobs:
             echo "| --- | --- |"
             echo "| notes measured from | \`${prev:-the start of the repository}\` |"
             echo "| commit | \`${GITHUB_SHA:0:7}\` |"
-            echo "| dry run | \`${{ inputs.dry_run }}\` |"
+            echo "| dry run | \`${{ inputs.dry_run }}\` (publish=${{ steps.mode.outputs.publish }}) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Chart version and appVersion are both the release version. The scheme
@@ -131,7 +152,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        if: ${{ !inputs.dry_run }}
+        if: steps.mode.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKERHUB_USER }}
@@ -144,7 +165,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ !inputs.dry_run }}
+          push: ${{ steps.mode.outputs.publish == 'true' }}
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
@@ -231,7 +252,7 @@ jobs:
           echo "--- final notes ---"; cat dist/RELEASE_NOTES.md
 
       - name: Dry run summary
-        if: ${{ inputs.dry_run }}
+        if: steps.mode.outputs.publish != 'true'
         run: |
           {
             echo "### Dry run — nothing was tagged, pushed or published"
@@ -242,7 +263,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push the chart to the OCI registry
-        if: ${{ !inputs.dry_run }}
+        if: steps.mode.outputs.publish == 'true'
         env:
           V: ${{ steps.ver.outputs.version }}
         run: |
@@ -269,7 +290,7 @@ jobs:
       # trade: repeating a push beats burning a release number, and it only
       # happens when a release has already failed.
       - name: Create the GitHub release and its tag
-        if: ${{ !inputs.dry_run }}
+        if: steps.mode.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}

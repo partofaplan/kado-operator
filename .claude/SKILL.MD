@@ -686,8 +686,9 @@ then, on a push only, `integration` → `version` → `publish`, followed by
 **Integration is a job in `ci.yml`, not a workflow of its own.** A workflow
 cannot declare a `needs` dependency on a *different* workflow. With integration
 tests in their own file, `version` could not wait for them, so a merge could
-tag and publish while integration tests were still running or already red. The Definition of Done requires them to pass, so they sit upstream
-of `version` in the same run.
+tag and publish while integration tests were still running or already red. The
+Definition of Done requires them to pass, so they sit upstream of `version` in
+the same run.
 
 **`release.yml` is `workflow_dispatch`, not `push: tags: v*`,** for the reason
 given under [Versioning](#two-consequences-worth-knowing) — and because a

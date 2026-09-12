@@ -52,10 +52,12 @@ That is a deliberate trade. A change that breaks the reconciler now merges
 before anything catches it, and the two post-merge failures differ:
 
 - **`integration` fails** — `version` depends on it, so no version is cut and
-  no image is published. `develop` carries a bad commit and no release.
+  no image is published. `develop` carries a bad commit and nothing shipped.
 - **`verify-picard` fails** — it runs *after* `publish`, so the version was
-  already cut, the image pushed and `latest` moved. The release exists and is
-  bad, and `picard` is left on the broken revision.
+  already cut, the image pushed and `latest` moved. A bad build is on Docker
+  Hub, and `picard` is left on the broken revision. No *release* is involved
+  either way: releases are cut deliberately, and a release would simply not be
+  cut from a bad commit.
 
 Either way the fix goes forward through a normal loop, or the commit is
 reverted.
