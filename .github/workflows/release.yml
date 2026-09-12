@@ -148,7 +148,7 @@ jobs:
       # property literally named `image:` — so grepping the full output and
       # taking the first match picked up the schema line and this gate failed
       # 100% of the time, on both Helm 3 and 4.
-      - name: Verify the packaged chart resolves the published image tag
+      - name: Verify both artifacts reference the published image tag
         env:
           V: ${{ steps.ver.outputs.version }}
         run: |
@@ -157,13 +157,13 @@ jobs:
             --namespace kado-operator-system \
             --show-only templates/deployment.yaml | grep -E '^[[:space:]]+image: ')
           echo "chart renders:${rendered}"
-          echo "$rendered" | grep -q "${IMAGE}:${V}" \
+          echo "$rendered" | grep -qF "${IMAGE}:${V}" \
             || { echo "::error::packaged chart does not reference ${IMAGE}:${V}"; exit 1; }
 
           # install.yaml is the other artifact users apply, generated separately
           # by `make build-installer`. It was correct by construction — so was
           # the chart's CRD copy, until helm-crds drift made that worth checking.
-          grep -q "${IMAGE}:${V}" dist/install.yaml \
+          grep -qF "${IMAGE}:${V}" dist/install.yaml \
             || { echo "::error::install.yaml does not reference ${IMAGE}:${V}"; exit 1; }
           echo "install.yaml references ${IMAGE}:${V}"
 
