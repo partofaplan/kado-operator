@@ -45,8 +45,16 @@ jobs:
     name: Helm deploy to ${{ inputs.kube_context }}
     runs-on: [ self-hosted, macOS, ARM64 ]
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
+      # persist-credentials: false matters more here than on a hosted runner.
+      # A self-hosted runner reuses its workspace between jobs, so the default
+      # would leave GITHUB_TOKEN sitting in .git/config on a physical machine.
+      # Nothing after this step needs git auth.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # A self-hosted runner does not get a login shell's PATH. On this machine
       # kubectl, helm and docker live in ~/.rd/bin (Rancher Desktop), which a
@@ -56,13 +64,17 @@ jobs:
         run: |
           set -euo pipefail
           for d in "$HOME/.rd/bin" /opt/homebrew/bin /usr/local/bin; do
-            [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"
+            [ -d "$d" ] || continue
+            echo "$d" >> "$GITHUB_PATH"
           done
 
       - name: Verify tooling
         run: |
           set -euo pipefail
-          for t in kubectl helm; do
+          # docker belongs here: preflight uses `docker manifest inspect` to
+          # confirm the image exists, and without it that check cannot tell
+          # "image missing" from "docker missing".
+          for t in kubectl helm docker; do
             command -v "$t" >/dev/null || { echo "::error::$t not found on PATH: $PATH"; exit 1; }
           done
           kubectl version --client
@@ -76,10 +88,11 @@ jobs:
         env:
           CTX: ${{ inputs.kube_context }}
           TAG: ${{ inputs.image_tag }}
+          NS: ${{ inputs.namespace }}
         run: |
           set -euo pipefail
 
-          if ! kubectl config get-contexts -o name | grep -qx "$CTX"; then
+          if ! kubectl config get-contexts "$CTX" >/dev/null 2>&1; then
             echo "::error::kube context '$CTX' not found. Available:"
             kubectl config get-contexts -o name | sed 's/^/  /'
             exit 1
@@ -91,7 +104,7 @@ jobs:
 
           # Deploying a tag that was never published is the most common cause of
           # a silent ImagePullBackOff. Catch it before touching the cluster.
-          if command -v docker >/dev/null && docker manifest inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
+          if docker manifest inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
             echo "Image ${IMAGE}:${TAG} exists."
           else
             echo "::error::image ${IMAGE}:${TAG} not found on Docker Hub. Published tags are visible at https://hub.docker.com/r/partofaplan/kado-operator/tags"
@@ -111,9 +124,15 @@ jobs:
                       -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
             rel=$(kubectl --context "$CTX" get crd "$CRD" \
                     -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || true)
-            if [ "$owner" != "Helm" ] || [ "$rel" != "$RELEASE" ]; then
-              echo "::error::CRD $CRD exists but is not owned by the Helm release '$RELEASE' (managed-by='${owner:-<none>}', release='${rel:-<none>}'). Helm will refuse to adopt it."
-              echo "Fix: run 'make uninstall' against this cluster to drop the kustomize-applied CRD, or deploy with --set installCRDs=false."
+            # Namespace matters as well as name: `namespace` is a dispatch
+            # input, so the same release name in a different namespace is a
+            # real case, and Helm rejects it with the same opaque error this
+            # check exists to pre-empt.
+            relns=$(kubectl --context "$CTX" get crd "$CRD" \
+                      -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}' 2>/dev/null || true)
+            if [ "$owner" != "Helm" ] || [ "$rel" != "$RELEASE" ] || [ "$relns" != "$NS" ]; then
+              echo "::error::CRD $CRD exists but is not owned by release '$RELEASE' in namespace '$NS' (managed-by='${owner:-<none>}', release='${rel:-<none>}', release-namespace='${relns:-<none>}'). Helm will refuse to adopt it."
+              echo "Fix: run 'make uninstall' against this cluster to drop a kustomize-applied CRD, or deploy with --set installCRDs=false, or reuse the namespace that already owns it."
               echo "Note: deleting the CRD deletes every DevEnvironment with it."
               exit 1
             fi
@@ -130,6 +149,13 @@ jobs:
 
           # Roll the release back if it never becomes ready, so a failed deploy
           # leaves the previous version running rather than a broken one.
+          #
+          # At revision 1 there is nothing to roll back TO, so Helm uninstalls
+          # instead — and because the chart templates the CRD, that removes it
+          # and every DevEnvironment with it. Preflight guarantees no foreign
+          # CRD at that point, so the exposure is a first install that fails,
+          # but it is worth knowing before running this against a cluster
+          # holding environments you care about.
           # Helm 4 renamed --atomic to --rollback-on-failure; pick by version so
           # this works on either and emits no deprecation warning.
           major=$(helm version --template='{{.Version}}' | sed 's/^v//; s/\..*//')
@@ -149,7 +175,12 @@ jobs:
           )
           if [ "$DRY" = "true" ]; then
             echo "Dry run — rendering only, nothing will be applied."
-            helm "${args[@]}" --dry-run
+            # --dry-run alone is deprecated in Helm 4; be explicit about client.
+            if [ "$major" -ge 4 ]; then
+              helm "${args[@]}" --dry-run=client
+            else
+              helm "${args[@]}" --dry-run
+            fi
             exit 0
           fi
           helm "${args[@]}"
