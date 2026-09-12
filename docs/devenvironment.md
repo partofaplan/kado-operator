@@ -152,6 +152,13 @@ Check conditions first — `phase` alone will not say why:
 kubectl describe devenvironment team-alpha
 ```
 
+> **A service that runs for a while before dying may briefly read as `Ready`.**
+> The operator sets no readiness probes, and Kubernetes calls a running
+> probe-less container ready the moment it starts. A container that crashes
+> after a few seconds therefore alternates between ready and degraded until it
+> settles into a backoff. A `readinessProbe` on the service spec would fix
+> this; there is no field for one yet.
+
 | Symptom | Likely cause |
 | --- | --- |
 | `Degraded=True`, "not managed by this DevEnvironment" | The target namespace already exists and belongs to something else. Pick a different `namespaceName`. |

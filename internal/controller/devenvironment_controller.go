@@ -673,6 +673,14 @@ func containerProblem(cs *corev1.ContainerStatus, pod *corev1.Pod, kind string) 
 	// lands in that window would otherwise see nothing wrong — flipping
 	// Degraded back to false and rewriting both conditions' transition times
 	// on every poll. Restart history is the stable signal.
+	// A container that completed successfully is done, not broken — a finished
+	// init container is the normal case. Checked explicitly rather than relying
+	// on cs.Ready and an empty lastState, both of which are kubelet fields whose
+	// init-container semantics moved with restartable init containers in 1.28.
+	if t := cs.State.Terminated; t != nil && t.ExitCode == 0 {
+		return ""
+	}
+
 	if cs.RestartCount > 0 {
 		if t := cs.LastTerminationState.Terminated; t != nil && t.ExitCode != 0 {
 			return fmt.Sprintf("restarting after failure (%s %q exited with %s, %d restart(s)); see `kubectl logs -n %s %s`",
