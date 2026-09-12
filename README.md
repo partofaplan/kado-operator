@@ -54,20 +54,28 @@ Images are published to Docker Hub as
 [`partofaplan/kado-operator`](https://hub.docker.com/r/partofaplan/kado-operator),
 built for `linux/amd64` and `linux/arm64`.
 
-Versions are `MAJOR.MINOR`. Merging into `develop` increments MINOR; promoting
-`develop` to `main` increments MAJOR and resets MINOR to zero. CI assigns
-every version — never tag by hand.
+Versions are `RELEASE.MAJOR.MINOR`, and each place moves on a different event:
+
+| Event | Effect | Example |
+| --- | --- | --- |
+| merge into `develop` | MINOR increments | `1.2.3` → `1.2.4` |
+| merge into `main` | MAJOR increments, MINOR resets | `1.2.4` → `1.3.0` |
+| a release package is cut | RELEASE increments, the rest reset | `1.3.0` → `2.0.0` |
+
+CI assigns every version — never tag by hand. Cutting a release is the one step
+a human starts, with `gh workflow run release.yml`; merging to `main` readies
+work, cutting a release ships it.
 
 Two tags are published, and only two:
 
 | Tag | Points at | Moves |
 | --- | --- | --- |
-| `MAJOR.MINOR` (e.g. `0.4`, `1.0`) | one exact release, forever | never |
-| `latest` | the most recently published version | every merge to `develop` or `main` |
+| `RELEASE.MAJOR.MINOR` (e.g. `1.2.3`) | one exact build, forever | never |
+| `latest` | the most recently published version | every merge to `develop` or `main`, and every release |
 
 Because versions only ever increase, `latest` is always the newest release on
 either branch — including development builds. It is a convenience for "give me
-the newest thing", not a stability channel: pin `MAJOR.MINOR` or a digest for
+the newest thing", not a stability channel: pin the version or a digest for
 anything reproducible.
 
 Older `sha-<short>` and `develop` tags exist on Docker Hub from before this
@@ -75,26 +83,26 @@ scheme and are frozen — nothing new is pushed to them. Every published commit
 already has a version of its own, so a per-commit tag and a branch tag were a
 second and third name for the same image.
 
-`MAJOR` here means *released*, not *breaking* — it marks the promotion of
-`develop` into `main`. Breaking changes are called out in the release notes,
-because the version number will not signal them.
+This is not SemVer: the middle place marks a promotion of `develop` into
+`main`, whatever the change contained. Breaking changes are called out in the
+release notes, because no place in the version number signals them.
 
 ```bash
 docker pull partofaplan/kado-operator:latest    # newest published build
-docker pull partofaplan/kado-operator:0.4       # one specific release, pinned
+docker pull partofaplan/kado-operator:1.2.3     # one specific build, pinned
 ```
 
 For anything reproducible — a pinned deployment, a bug report, a rollback — use
-the `MAJOR.MINOR` tag or a digest rather than `latest`. Each CI run prints the
+the version tag or a digest rather than `latest`. Each CI run prints the
 digest it published in its job summary.
 
 ## Install
 
-> **Before the first release.** The published chart and `install.yaml` are
-> produced by promoting `develop` to `main`, which has not happened yet. Until
-> it does, install from a checkout — the two commands under *from a checkout*
-> below work today. (The `latest` image tag does not require a promotion; it
-> moves on every publish.)
+> **Before the first release.** The published chart, `install.yaml` and the
+> GitHub release are produced by cutting a release, which is a deliberate
+> `workflow_dispatch` and has not happened yet. Until it does, install from a
+> checkout — the command under *from a checkout* below works today and pulls
+> the `latest` image, which moves on every publish.
 
 ```bash
 helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \

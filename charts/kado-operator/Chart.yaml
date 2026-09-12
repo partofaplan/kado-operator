@@ -1,7 +1,16 @@
 apiVersion: v2
 name: kado-operator
-version: 0.1.0
-appVersion: "0.1"   # MAJOR.MINOR: must name a published image tag
+# Both are placeholders. CI overwrites them at package time with the release
+# version (`helm package --version X.Y.Z --app-version X.Y.Z`), so a published
+# chart is always pinned.
+#
+# appVersion is "latest" rather than a number on purpose: the chart defaults
+# image.tag to it, so installing straight from a checkout gets the newest
+# published build instead of whatever number happened to be committed here —
+# which used to drift out of date and render an image tag that was never
+# pushed. Pass --set image.tag=X.Y.Z to pin.
+version: 0.0.0
+appVersion: "latest"
 description: Operator for provisioning dev environments in Kubernetes
 type: application
 keywords:

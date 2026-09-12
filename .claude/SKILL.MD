@@ -229,7 +229,7 @@ and let the reviewer decide.
 
 Only an approved merge request may be merged. The merge is what authorises the
 version: merging into `develop` cuts the next MINOR, merging into `main` cuts the
-next MAJOR, and CI does the tagging (see [Versioning](#versioning-majorminor)).
+next MAJOR, and CI does the tagging (see [Versioning](#versioning-releasemajorminor)).
 Nothing is tagged or released that did not pass an independent review.
 
 ### Gate 5 — Automatic post-merge validation
@@ -325,22 +325,29 @@ This is the complete list.
   request.**
 
 
-## Versioning: MAJOR.MINOR
+## Versioning: RELEASE.MAJOR.MINOR
 
-Versions are `MAJOR.MINOR`. There is no patch component.
+Three places, and each moves on a different event:
 
 | Event | Effect | Example |
 | --- | --- | --- |
-| Push to `develop` | MINOR increments | `v1.4` → `v1.5` |
-| `develop` merged to `main` | MAJOR increments, MINOR resets to 0 | `v1.5` → `v2.0` |
+| Merge into `develop` | MINOR increments | `1.2.3` → `1.2.4` |
+| Merge into `main` | MAJOR increments, MINOR resets | `1.2.4` → `1.3.0` |
+| A release package is cut | RELEASE increments, the rest reset | `1.3.0` → `2.0.0` |
 
-So a cycle reads: `v0.1`, `v0.2`, `v0.3` on `develop`, then `v1.0` when that work
-reaches `main`, then `v1.1`, `v1.2` on `develop`, then `v2.0`, and so on.
+So a cycle reads: `1.2.1`, `1.2.2`, `1.2.3` on `develop`, then `1.3.0` when
+that work reaches `main`, then `1.3.1` on `develop` again — and `2.0.0` when
+someone decides to ship.
 
-**MAJOR here means "released", not "breaking".** This is a deliberate departure
-from SemVer: a major bump marks the promotion of `develop` into `main`, whatever
-the change contained. Communicate breaking changes in the release notes, because
-the version number will not signal them.
+**This is not SemVer, and the middle place in particular does not mean what
+SemVer means by MAJOR.** A merge to `main` moves it whatever the change
+contained. Communicate breaking changes in the release notes, because no place
+in the version number signals them.
+
+**RELEASE moves only when a release package is made**, which is a decision
+rather than a side effect of a merge. That is the whole reason it is a separate
+place: promoting `develop` to `main` readies work, and cutting a release ships
+it, and those are not the same act.
 
 ### Who assigns versions
 
@@ -348,19 +355,82 @@ GitHub Actions does, never a human. The version is derived from the highest
 existing `v*` git tag, so the tags themselves are the source of truth — there is
 no VERSION file to drift, and no commit written back to a branch.
 
-- Push to `develop` → tag `v<MAJOR>.<MINOR + 1>`
-- Push to `main` → tag `v<MAJOR + 1>.0`
+The arithmetic lives in **`hack/next-version.sh`**, not inline in a workflow,
+because `ci.yml` and `release.yml` both need the same rules and two copies would
+eventually disagree about what "next" means. It has tests in
+`hack/next-version_test.sh`, run by `make test-scripts` on every pull request —
+a mistake here mints an immutable tag and publishes an image under it, and
+neither can be moved afterwards.
+
+- Push to `develop` → `./hack/next-version.sh minor`
+- Push to `main` → `./hack/next-version.sh major`
+- Release dispatch → `./hack/next-version.sh release`
+
+A **release tag is one where both MAJOR and MINOR are zero** (`vR.0.0`). That is
+what makes "since the last release" answerable without keeping a separate
+marker, and it is how the release notes find their range.
+
+The repo used a two-place `vMAJOR.MINOR` scheme through `v0.9`. The script seeds
+from the highest of those as `R.M.0` when no three-place tag exists yet, so
+numbering stayed monotonic across the change and no new tag sorts below an image
+already on Docker Hub. Once a three-place tag exists that path is dead.
+
+### Cutting a release
+
+Releases are `workflow_dispatch` on `.github/workflows/release.yml`, from `main`
+only — the workflow refuses to run from anywhere else. It is the one workflow a
+human starts.
+
+```bash
+gh workflow run release.yml -f dry_run=true    # build and print the notes, change nothing
+gh workflow run release.yml -f dry_run=false   # tag, publish, create the release
+```
+
+`dry_run` defaults to **true**: it builds every artifact and prints the notes it
+would publish, without tagging, pushing or releasing. Use it first.
+
+**The tag is created last, by the release-creation step itself.** That ordering
+is load-bearing: the tag is what `next-version.sh` counts from, so pushing it
+earlier meant a failed chart push left the number burned — a re-dispatch would
+compute the *next* release and the tag would stand with nothing behind it.
+
+The image and chart are still pushed before the tag exists. A failure after
+them is recoverable: a re-dispatch recomputes the same version and republishes
+both from the same source — an equivalent rebuild, though at a new digest,
+since neither is byte-reproducible. So in that one recovery path a version tag
+can move. Repeating a push beats burning a release number.
+
+The release package is everything a user needs to deploy the operator to a
+cluster of their own:
+
+| Artifact | What it is |
+| --- | --- |
+| `install.yaml` | CRD, RBAC and the Deployment in one manifest, for `kubectl apply` |
+| `kado-operator-<version>.tgz` | The Helm chart, also pushed to the OCI registry |
+| `crd.yaml` | The `DevEnvironment` CRD on its own |
+| `devenvironment-sample.yaml` | A sample environment to apply |
+| the image | version-pinned and by digest, both named in the notes |
+
+Notes are generated from the **pull requests merged since the previous release
+tag**, not since the previous tag. Every merge into `develop` or `main` cuts a
+tag, so the default "since the last tag" would describe a single merge rather
+than the release.
+
+On the *first* release there is no previous release to measure from, so the
+range falls back to the earliest tag in the repository
+(`./hack/next-version.sh first-tag`) and the notes cover the whole history.
+Leaving the range unset instead would have quietly fallen back to the previous
+tag — one merge.
 
 ### Image tags: the version, and `latest`
 
 **The registry carries exactly two kinds of tag.** A published image is tagged
-with its `MAJOR.MINOR` version, and `latest` moves to whatever was published most
-recently — which, because versions only ever increase, is always the newest
-release on either branch.
+with its `RELEASE.MAJOR.MINOR` version, and `latest` moves to whatever was
+published most recently.
 
 | Tag | Points at | Moves |
 | --- | --- | --- |
-| `MAJOR.MINOR` (e.g. `1.5`, `2.0`) | one exact release, forever | never |
+| `RELEASE.MAJOR.MINOR` (e.g. `1.2.3`) | one exact build, forever | never |
 | `latest` | the most recently published version | every publish |
 
 Nothing else is published. There are deliberately **no `sha-<short>` tags and no
@@ -370,35 +440,35 @@ thing that already has one, and a branch tag is a worse-specified alias for
 `latest`. Three naming schemes for the same image is three chances to deploy
 something other than what you meant.
 
-**Pin the `MAJOR.MINOR` tag, or a digest, for anything reproducible.** `latest`
-is a convenience for "give me the newest thing", and it deliberately follows
-development builds as well as promotions — it is not a stability channel.
-
-Nothing builds a `sha-` tag any more, locally or otherwise: [Gate 5](#gate-5--automatic-post-merge-validation)
-deploys the published `MAJOR.MINOR` tag, and no other stage puts an image on a
-cluster.
+**Pin the version tag, or a digest, for anything reproducible.** `latest` is a
+convenience for "give me the newest thing", and it deliberately follows
+development builds as well as releases — it is not a stability channel.
 
 ### Two consequences worth knowing
 
-**Helm charts need a patch component, and `appVersion` must name a real image
-tag.** Helm requires full SemVer2, so `0.2` is rejected as a chart version.
-Charts are published as `MAJOR.MINOR.0` (`v0.2` → chart `0.2.0`).
+**The chart version and `appVersion` are both the release version.** Helm
+requires full SemVer2, which a three-place scheme already satisfies — so unlike
+the old two-place scheme there is no invented patch component. `appVersion` must
+name an image tag that is actually published, because the chart defaults
+`image.tag` to it; the release workflow renders the packaged chart and fails if
+the reference does not match what it is about to push.
 
-`appVersion` is set to the **unprefixed** `0.2`, not `v0.2`. The chart defaults
-`image.tag` to `.Chart.AppVersion`, and the published image tag is `0.2` — a
-`v`-prefixed `appVersion` renders an image reference that was never pushed, and
-every `helm install` fails with `ImagePullBackOff`. Whenever you change how
-versions are named, render the packaged chart and check the image reference
-against the tags the publish job actually pushes.
+The committed `Chart.yaml` carries `version: 0.0.0` and `appVersion: "latest"`
+as placeholders, both overwritten at package time. `appVersion` is `latest`
+rather than a number so that installing straight from a checkout gets the newest
+published build, instead of whatever number happened to be committed — which is
+what used to drift and render an image reference that was never pushed.
 
 **A tag pushed by CI does not trigger another workflow.** GitHub suppresses
 workflow triggers for pushes made with the default `GITHUB_TOKEN`, to prevent
-loops. A separate release workflow listening on `push: tags: v*` would therefore
-never fire, and would sit there looking correct. Everything that reacts to a new
-version — image tags, chart publish, GitHub release — must live in the same run
-that creates the tag.
+loops. A release workflow listening on `push: tags: v*` would therefore never
+fire. `release.yml` is `workflow_dispatch` instead, which also matches what it
+is: a decision, not a reaction.
 
----
+Note that `workflow_dispatch` requires the workflow file to exist on the
+**default branch**. `release.yml` is only dispatchable once it has reached
+`main`.
+
 
 ## Phase 1: Local Development Setup
 
@@ -705,8 +775,11 @@ gh pr create --base main --head develop \
 # merge only on APPROVE
 ```
 
-That push tags `v2.0`, publishes `partofaplan/kado-operator:2.0`, moves `latest`,
-pushes the chart as `2.0.0`, and creates the GitHub release.
+That push tags the next MAJOR — `v1.2.4` → `v1.3.0` — publishes
+`partofaplan/kado-operator:1.3.0` and moves `latest`. It does **not** create a
+release: no chart is pushed, no `install.yaml` is built and no GitHub release
+appears. Promoting readies the work; shipping it is a separate, deliberate act.
+See [Cutting a release](#cutting-a-release).
 
 Then bring `main` back into `develop` so the branches do not diverge — through a
 merge request, like everything else:
@@ -723,8 +796,8 @@ gh pr create --base develop --title "Back-merge main into develop" --fill
 hotfix reaches `develop` only through this back-merge, and pushing directly would
 carry hotfix code into `develop` with no review and no verification.
 
-Merging that request cuts `v2.1`. This is expected: the first development build
-after a release is `MAJOR.1`.
+Merging that request cuts the next MINOR — `v1.3.0` → `v1.3.1`. This is
+expected: the first development build after a promotion moves the last place.
 
 ### Hotfixes
 
@@ -744,8 +817,9 @@ It is also the one path no automated cluster validation covers: [Gate 5](#gate-5
 `make test-integration` by hand against a cluster of your own before merging one,
 and record in the merge request that you did.
 
-Merging it to `main` cuts the next MAJOR, because `main` only ever produces MAJOR
-versions. Afterwards, back-merge `main` into `develop` as above. That is the only
+Merging it to `main` cuts the next MAJOR, because `main` only ever produces
+MAJOR bumps. It does not cut a release; a hotfix reaches users when someone cuts
+one. Afterwards, back-merge `main` into `develop` as above. That is the only
 route by which the fix reaches `develop`.
 
 ---

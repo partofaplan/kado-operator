@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `.github/workflows/release.yml`: a `workflow_dispatch` release, from `main`
+  only, that cuts the next RELEASE version and publishes the package — the
+  multi-arch image, the Helm chart (attached and pushed to the OCI registry),
+  `install.yaml`, the CRD on its own, and a sample environment. Release notes
+  are generated from the pull requests merged since the **previous release
+  tag**, not the previous tag, since every merge cuts one. `dry_run` defaults
+  to true and builds everything without tagging or publishing. The version is
+  tagged only after every artifact has been built, so a failed package cannot
+  burn a release number.
+- `hack/next-version.sh` and `hack/next-version_test.sh` (`make test-scripts`).
+
 - `readinessProbe` on a service spec: a standard Kubernetes probe, with an
   empty handler (`readinessProbe: {}`) filled in as a TCP check against the
   service's own port. Without a probe Kubernetes calls a running container
@@ -17,6 +28,25 @@ All notable changes to this project are documented here. The format follows
   unchanged.
 
 ### Changed
+
+- Versions are now `RELEASE.MAJOR.MINOR`. Merging into `develop` moves MINOR,
+  merging into `main` moves MAJOR, and cutting a release moves RELEASE. The
+  first two stay automatic; the third is a deliberate `workflow_dispatch`,
+  because promoting work and shipping it are different acts. Numbering seeds
+  from the highest two-place tag (`v0.9` → `0.9.0`) so it stays monotonic
+  across the change and nothing sorts below an image already published.
+- The version arithmetic moved out of `ci.yml` into `hack/next-version.sh`,
+  shared with `release.yml` and covered by tests run on every pull request.
+  Two inline copies would eventually have disagreed about what "next" means,
+  and a mistake here mints an immutable tag and publishes an image under it.
+- `Chart.yaml` carries `version: 0.0.0` and `appVersion: "latest"` as
+  placeholders, both overwritten at package time. `appVersion` is `latest`
+  rather than a number so a from-a-checkout install gets the newest published
+  build instead of a committed number that drifts out of date and renders an
+  image reference that was never pushed.
+- Promoting `develop` to `main` no longer creates a GitHub release. It cuts a
+  MAJOR version and publishes an image; the chart, `install.yaml` and the
+  release itself now come from the release workflow.
 
 - No stage before a merge touches a cluster. The `integration` job is now
   `push`-only, so a pull request runs only lint, code generation, unit tests,
@@ -42,7 +72,7 @@ All notable changes to this project are documented here. The format follows
   counts a skipped check as satisfied — leaving it required gave false
   assurance while the only new pre-merge signal went unguarded.
 
-- Image tags reduced to two kinds: the immutable `MAJOR.MINOR` version, and
+- Image tags reduced to two kinds: the immutable version, and
   `latest` pointing at whatever was published most recently. Per-commit
   (`sha-<short>`) and floating branch tags are no longer published — every
   commit that reaches a publish already has a version of its own. Tags pushed
@@ -93,7 +123,7 @@ All notable changes to this project are documented here. The format follows
   push), integration tests on an ephemeral cluster, and tagged releases that
   publish a multi-arch image and the chart to Docker Hub under `partofaplan`.
 - Multi-arch (`linux/amd64`, `linux/arm64`) images. Each publish pushes the
-  immutable `MAJOR.MINOR` version tag and moves `latest` to it.
+  immutable version tag and moves `latest` to it.
 - Dockerfile builder stage pinned to `$BUILDPLATFORM`, so multi-arch builds
   cross-compile natively instead of emulating the toolchain under QEMU. This
   removes the need for kubebuilder's generated `Dockerfile.cross` workaround.
