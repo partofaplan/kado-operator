@@ -782,3 +782,80 @@ func TestPodProblemIgnoresACleanlyCompletedContainer(t *testing.T) {
 	pod.Status.ContainerStatuses = nil
 	assert.Empty(t, podProblem(pod), "an init container that eventually succeeded is not a problem")
 }
+
+func TestReadinessProbe(t *testing.T) {
+	t.Run("absent by default, preserving prior behaviour", func(t *testing.T) {
+		spec := &devenvv1alpha1.ServiceSpec{Name: "redis", Port: 6379}
+		assert.Nil(t, readinessProbe(spec))
+	})
+
+	t.Run("an empty handler becomes a TCP check on the service's own port", func(t *testing.T) {
+		spec := &devenvv1alpha1.ServiceSpec{
+			Name: "redis", Port: 6379,
+			ReadinessProbe: &corev1.Probe{PeriodSeconds: 5},
+		}
+		got := readinessProbe(spec)
+		require.NotNil(t, got)
+		require.NotNil(t, got.TCPSocket, "an empty handler is a silent no-op in Kubernetes; it must be filled in")
+		assert.Equal(t, intstrFromInt32(6379), got.TCPSocket.Port)
+		assert.Equal(t, int32(5), got.PeriodSeconds, "the caller's other probe settings must survive")
+	})
+
+	t.Run("an explicit handler is passed through untouched", func(t *testing.T) {
+		spec := &devenvv1alpha1.ServiceSpec{
+			Name: "api", Port: 8080,
+			ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstrFromInt32(9090)},
+			}},
+		}
+		got := readinessProbe(spec)
+		require.NotNil(t, got.HTTPGet)
+		assert.Equal(t, "/healthz", got.HTTPGet.Path)
+		assert.Equal(t, intstrFromInt32(9090), got.HTTPGet.Port, "an explicit port must not be replaced by spec.port")
+		assert.Nil(t, got.TCPSocket)
+	})
+
+	t.Run("the caller's spec is not mutated", func(t *testing.T) {
+		spec := &devenvv1alpha1.ServiceSpec{
+			Name: "redis", Port: 6379,
+			ReadinessProbe: &corev1.Probe{},
+		}
+		_ = readinessProbe(spec)
+		assert.Equal(t, corev1.ProbeHandler{}, spec.ReadinessProbe.ProbeHandler,
+			"filling the handler in place would mutate the DevEnvironment we were handed")
+	})
+}
+
+func TestReconcileRendersTheReadinessProbeOntoTheDeployment(t *testing.T) {
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Services[0].ReadinessProbe = &corev1.Probe{}
+	}))
+	reconcile(t, r)
+
+	var d appsv1.Deployment
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "redis", Namespace: targetNS}, &d))
+	probe := d.Spec.Template.Spec.Containers[0].ReadinessProbe
+	require.NotNil(t, probe)
+	require.NotNil(t, probe.TCPSocket)
+	assert.Equal(t, intstrFromInt32(6379), probe.TCPSocket.Port)
+}
+
+// The pod template must be byte-stable across reconciles, or every pass would
+// roll the Deployment.
+func TestReconcileWithAProbeIsIdempotent(t *testing.T) {
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Services[0].ReadinessProbe = &corev1.Probe{}
+	}))
+	ctx := context.Background()
+	reconcile(t, r)
+
+	var first appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &first))
+	reconcile(t, r)
+	var second appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &second))
+
+	assert.Equal(t, first.Spec.Template, second.Spec.Template)
+	assert.Equal(t, first.Generation, second.Generation, "a second reconcile must not roll the Deployment")
+}

@@ -104,6 +104,7 @@ silently attempts.
 | `secretRefs` | []string | — | Secrets in the `DevEnvironment`'s **own** namespace, copied into the environment namespace and mounted via `envFrom`. |
 | `mountPath` | string | — | Mounts the shared volume here. Requires `spec.storage`. |
 | `resources` | ResourceRequirements | — | Compute resources for the container. |
+| `readinessProbe` | Probe | — | Gates when the service counts as ready. A standard Kubernetes probe; leave the handler empty (`readinessProbe: {}`) for a TCP check against this service's own `port`. See [Readiness](#readiness). |
 
 Put credentials in `secretRefs`, not `env` — `env` values are stored in the
 `DevEnvironment` spec in plain text and visible to anyone who can read it.
@@ -144,6 +145,48 @@ released once the namespace is gone, so the record remains visible while
 teardown is in flight. A namespace the operator did not create is left
 untouched and the finalizer is released immediately.
 
+## Readiness
+
+Without a probe, `readyServices` counts containers Kubernetes *started*, not
+services that work. A probe-less container is ready the instant it starts, so a
+database still replaying its WAL — or one about to crash — counts as ready.
+
+The shortest useful form is an empty handler, which becomes a TCP check against
+the port the service already declares:
+
+```yaml
+services:
+  - name: postgres
+    image: postgres:16-alpine
+    port: 5432
+    readinessProbe: {}          # TCP connect to 5432
+```
+
+An empty handler is filled in rather than passed through because Kubernetes
+accepts a probe with no action and silently never runs it — `readinessProbe: {}`
+would otherwise look like it was doing something while changing nothing.
+
+Anything a Kubernetes probe supports works, and an explicit handler is used
+verbatim:
+
+```yaml
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 10
+```
+
+Adding or changing a probe rolls the service's Deployment, as any pod-template
+change does. Omitting the field leaves behaviour exactly as it was.
+
+A probe that never passes leaves the environment at `Provisioning` with
+`Degraded=False` indefinitely — the container is running, so nothing is
+*blocked*, it is simply not answering. That is reported honestly rather than as
+a failure, but it does mean a probe aimed at the wrong port looks like a slow
+start forever. `kubectl describe pod -n <env>` names the failing probe.
+
 ## Troubleshooting
 
 Check conditions first — `phase` alone will not say why:
@@ -152,18 +195,18 @@ Check conditions first — `phase` alone will not say why:
 kubectl describe devenvironment team-alpha
 ```
 
-> **A service that runs for a while before dying may briefly read as `Ready`.**
-> The operator sets no readiness probes, and Kubernetes calls a running
-> probe-less container ready the moment it starts. A container that crashes
-> after a few seconds therefore alternates between ready and degraded until it
-> settles into a backoff. A `readinessProbe` on the service spec would fix
-> this; there is no field for one yet.
+> **A service with no `readinessProbe` may briefly read as `Ready` before
+> dying.** Kubernetes calls a running probe-less container ready the moment it
+> starts, so a container that crashes a few seconds in alternates between ready
+> and degraded until it settles into a backoff. Set a
+> [readinessProbe](#readiness) to make `Ready` mean the service is actually
+> answering.
 
 | Symptom | Likely cause |
 | --- | --- |
 | `Degraded=True`, "not managed by this DevEnvironment" | The target namespace already exists and belongs to something else. Pick a different `namespaceName`. |
 | `Degraded=True`, "reading source secret" | A name in `secretRefs` does not exist in the `DevEnvironment`'s own namespace. |
 | `Degraded=True`, reason `WorkloadUnhealthy` | A container cannot start. The message names the service, the blocking reason (`CrashLoopBackOff`, `ImagePullBackOff`, `Unschedulable`, …), the last exit code and the `kubectl logs` command that shows why. A missing required env var — `POSTGRES_PASSWORD`, say — lands here. |
-| Stuck at `Provisioning` with `Degraded=False` | Pods are still coming up and nothing has gone wrong yet. If it persists, check image pull times, and whether a PVC is waiting for a consumer — a volume no service mounts stays `Pending` forever. |
+| Stuck at `Provisioning` with `Degraded=False` | Pods are running but not ready. Nothing is *blocked*, so this is not degraded: check image pull times, whether a PVC is waiting for a consumer (a volume no service mounts stays `Pending` forever), and whether a `readinessProbe` is pointed at a port nothing serves. A probe that never passes will sit here indefinitely — `kubectl describe pod -n <env>` shows the failing probe. |
 | Stuck deleting | The namespace is still terminating, usually a finalizer on something inside it. `kubectl get ns <env> -o yaml`. |
 | `helm install` rejects the CRD as not Helm-owned | The CRD was installed by `make install` (kustomize). See [CRD ownership](development.md#crd-ownership-make-install-vs-the-chart). |

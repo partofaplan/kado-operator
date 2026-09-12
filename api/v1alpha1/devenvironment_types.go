@@ -114,6 +114,22 @@ type ServiceSpec struct {
 	// resources are the compute resources for the container.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// readinessProbe gates when this service counts as ready.
+	//
+	// Without one, Kubernetes calls a running container ready the instant it
+	// starts, so a service that takes time to accept connections — or that
+	// crashes a few seconds in — reports Ready in the meantime, and the
+	// environment's own readyServices count inherits that. Setting a probe
+	// makes "Ready" mean the service is actually answering.
+	//
+	// Leave the handler empty for a TCP check against this service's own
+	// port, which is the right answer for most databases, caches and queues:
+	//
+	//	readinessProbe: {}
+	//
+	// +optional
+	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 }
 
 // DevEnvironmentSpec defines the desired state of DevEnvironment.
