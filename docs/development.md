@@ -49,18 +49,20 @@ exception: it starts an API server and etcd as local binaries, with no
 container runtime and no nodes.)
 
 That is a deliberate trade. A change that breaks the reconciler now merges
-before anything catches it. What protects the line is that `version` depends on
-the integration job, so a failing post-merge run cuts no version and publishes
-no image — `develop` is left with a bad commit and no release, and the fix goes
-forward through a normal loop, or the commit is reverted.
+before anything catches it, and the two post-merge failures differ:
+
+- **`integration` fails** — `version` depends on it, so no version is cut and
+  no image is published. `develop` carries a bad commit and no release.
+- **`verify-picard` fails** — it runs *after* `publish`, so the version was
+  already cut, the image pushed and `latest` moved. The release exists and is
+  bad, and `picard` is left on the broken revision.
+
+Either way the fix goes forward through a normal loop, or the commit is
+reverted.
 
 `make test-integration` still works against whatever context you have selected.
 It is a tool, not a gate: reach for it when you are changing reconciler
 behaviour and want the feedback early, against a cluster of your own.
-
-The documentation exemption is decided mechanically from the diff, not by
-judgement, and the claim is stated in the merge request so the reviewer can
-check it. One non-`.md` file and the gate applies to the whole change.
 
 Nothing is tagged or released that did not come through an approved merge
 request. The full rules live in `.claude/SKILL.MD`, which is authoritative.

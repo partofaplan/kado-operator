@@ -23,10 +23,14 @@ All notable changes to this project are documented here. The format follows
   validation after the merge rather than a manual cluster deploy before it.
   Both Gate 3 exemptions (`develop`→`main` and documentation-only) are gone
   along with the manual gate that needed them.
-- Corrected the `picard` kube context name in `docs/development.md`, which gave
-  `k3d-picard` for `deploy.yml`'s `kube_context` input and in the self-hosted
-  runner notes. The context and the k3d cluster are both `picard`;
-  `k3d-picard` is only the kubeconfig cluster-entry name.
+- Corrected the `picard` kube context name in `deploy.yml`'s `kube_context`
+  default and in `docs/development.md`. The context and the k3d cluster are
+  both `picard`; `k3d-picard` is only the kubeconfig cluster-entry name, so the
+  old default failed `deploy.yml`'s own preflight.
+- Branch protection on `develop` and `main` now requires `Image builds` instead
+  of `Integration`. `Integration` no longer runs on pull requests, and GitHub
+  counts a skipped check as satisfied — leaving it required gave false
+  assurance while the only new pre-merge signal went unguarded.
 
 - Image tags reduced to two kinds: the immutable `MAJOR.MINOR` version, and
   `latest` pointing at whatever was published most recently. Per-commit

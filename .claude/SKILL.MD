@@ -100,11 +100,17 @@ in [Gate 5](#gate-5--automatic-post-merge-validation).
 
 Know what this costs, because it is a deliberate trade and not a free one: a
 change that breaks the reconciler now merges into `develop` before anything
-catches it. What protects the line is that `version` is gated on the integration
-job, so a failing post-merge run cuts **no version and publishes no image** —
-`develop` is left with a bad commit and no release, and the fix goes forward
-through a normal loop. Reverting is always available and is often the faster
-answer.
+catches it. Two different things can then fail, and only one of them is
+contained:
+
+- **`integration` fails.** `version` is gated on it, so no version is cut and
+  no image is published. `develop` carries a bad commit and no release.
+- **`verify-picard` fails.** This runs *after* `publish`, so by then the
+  version **was** cut, the image **was** pushed, and `latest` **was** moved.
+  The release exists and is bad. `picard` is also left on the broken revision.
+
+Either way the fix goes forward through a normal loop, and reverting is always
+available and often faster. Do not read the first bullet as covering both.
 
 `make test-integration` still exists and still works against whatever context
 you have selected. It is a tool, not a gate — reach for it deliberately when you
@@ -276,6 +282,13 @@ hand is the escape hatch.
 nothing that did not already pass it, and wiring a disposable dev cluster into
 the release path would make releases fail for reasons unrelated to the release.
 
+**It does not run after *every* merge, despite the name.** `verify-picard`
+depends on `version` and `publish`, so it is skipped whenever either is skipped
+or fails — including the documented case where three merges land in quick
+succession and the middle run is cancelled by the `version-assign` concurrency
+group. That commit gets no version, no image and no validation, silently. Space
+merges out, or re-run the cancelled workflow.
+
 **`picard` is a shared test cluster, and this job is serialised.** Two runs would
 fight over the same release and delete each other's test environment. It also
 means `picard` is not a cluster to keep anything you care about on: whatever is
@@ -294,8 +307,12 @@ This is the complete list.
 
 - **Never commit directly to `develop` or `main`,** including fast-forward merges.
 - **Never open a merge request before the Definition of Done is met.**
-- **Never deploy the operator or apply a CRD from a feature branch,** to any
-  cluster, including a throwaway one.
+- **Never make a cluster part of a pull request's checks,** and never deploy a
+  feature branch to a shared cluster. Running `make test-integration` by hand
+  against a throwaway cluster of your own is fine and sometimes required — see
+  [Nothing before the merge touches a cluster](#nothing-before-the-merge-touches-a-cluster).
+  What is forbidden is a CI job that needs a cluster before the merge, and
+  pointing a feature branch at `picard` or anything anyone else uses.
 - **Never keep anything you care about on `picard`.** It tracks `develop`
   automatically and its test environments are deleted on every run.
 - **Never review your own change.** If you wrote it, a different agent reviews it.
@@ -589,8 +606,9 @@ account password. On why the username is not alongside it, see
 
 One workflow owns the whole line. It validates every merge request, and on
 `develop` and `main` it additionally assigns the next version, tags the commit,
-and publishes. Jobs: `lint`, `generated`, `test`, `image`, `integration`, then
-`version` → `publish` → `release`.
+and publishes. Jobs: `lint`, `generated`, `test` and `image` on everything;
+then, on a push only, `integration` → `version` → `publish`, followed by
+`verify-picard` on `develop` and `release` on `main`.
 
 ### Decisions that look wrong until you know why
 
@@ -615,10 +633,19 @@ cuts no version and publishes no image.
 **`verify-picard` runs after `publish`, not before `version`.** It deploys the
 published tag, so what is validated is the exact artifact a user would install
 rather than a locally built lookalike. It is also the only job on a self-hosted
-runner in this workflow, and it is reachable only from a `push` to `develop` —
-which can only happen through a reviewed, merged pull request. No fork code and
-no unreviewed code ever executes on that machine. Do not add a `pull_request`
-trigger to it.
+runner in this workflow, and it is reachable only from a `push` to `develop`.
+**No fork code can ever reach that machine**: a fork's pull request never
+allocates the runner, because the job does not run on `pull_request` at all.
+Do not add a `pull_request` trigger to it.
+
+Be precise about the weaker half, though. `develop` is protected and requires a
+pull request, but `required_approving_review_count` is **0** — GitHub enforces
+that a merge goes through a PR, not that anyone approved it. Someone with write
+access can therefore self-merge and have that commit's steps run automatically
+on a physical Mac with an admin kubeconfig. The independent-agent review in
+[Gate 3](#gate-3--independent-agent-review) is a process rule, not something
+the forge enforces. Raising the count would enforce it, at the cost of blocking
+the agent-driven loop, since a reviewing agent does not post a GitHub approval.
 
 **Only `develop` and `main` are in the `push` trigger.** Feature and hotfix
 branches are covered by the `pull_request` trigger instead. Listing both meant
@@ -856,7 +883,7 @@ forward through a normal loop, or revert. If `verify-picard` failed, the image
 | --- | --- |
 | `ImagePullBackOff` on the operator pod | `publish` succeeded but pushed a tag the chart does not reference, or Docker Hub is unreachable from `picard`. Check the tag in the job log against <https://hub.docker.com/r/partofaplan/kado-operator/tags>. |
 | Operator runs but the test environment never leaves `Provisioning` | RBAC. `make run` uses your kubeconfig and hides missing permissions; the chart's ClusterRole is what the pod actually gets. Check the logs for `forbidden`. |
-| Helm refuses to upgrade, ownership error | A CRD applied by `make install` against `picard` — someone ran `make test-integration` at it. The preflight step names this explicitly. Clear it with `make uninstall` against the `picard` context. |
+| Helm refuses to upgrade, ownership error | A CRD applied by `make install` against `picard` — someone ran `make test-integration` at it. The preflight step names this explicitly. Clearing it means `make uninstall` against the `picard` context, which **deletes the CRD and every `DevEnvironment` on the cluster**. That is acceptable on `picard` and nowhere else; check what is running there first. |
 | Job cannot start | The self-hosted runner is offline, or `picard` is down. Neither is a skip: no validation happened. |
 | `picard` still broken after a fix | Nothing rolls it back on its own. Either merge the fix, which upgrades it, or `helm rollback kado-operator -n kado-operator-system --kube-context picard`. |
 

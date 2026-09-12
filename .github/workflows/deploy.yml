@@ -20,9 +20,9 @@ on:
         default: 'kado-operator-system'
         type: string
       kube_context:
-        description: 'kubectl context to deploy to'
+        description: 'kubectl context to deploy to (the context is `picard`; `k3d-picard` is the kubeconfig cluster entry and is NOT a context)'
         required: true
-        default: 'k3d-picard'
+        default: 'picard'
         type: string
       dry_run:
         description: 'Render and validate without applying anything'

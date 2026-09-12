@@ -465,7 +465,9 @@ jobs:
             --namespace "$NS" --create-namespace \
             --set image.tag="$V" \
             --wait --timeout 5m
-          helm --kube-context "$CTX" -n "$NS" status "$RELEASE" | head -5
+          # `| head` under `set -o pipefail` fails the step if helm ever
+          # outgrows the pipe buffer and dies on SIGPIPE.
+          helm --kube-context "$CTX" -n "$NS" status "$RELEASE" | head -5 || true
 
       - name: Validate a dev environment end to end
         run: |
@@ -516,7 +518,7 @@ jobs:
           YAML
 
           for i in $(seq 1 60); do
-            PH=$(kubectl --context "$CTX" get devenvironment "$TEST_ENV" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            PH=$(kubectl --context "$CTX" -n default get devenvironment "$TEST_ENV" -o jsonpath='{.status.phase}' 2>/dev/null || true)
             [ "$PH" = "Ready" ] && break
             sleep 5
           done
@@ -540,7 +542,7 @@ jobs:
           # step silently, skipping the assertions below. `<<<` appends the
           # newline; a genuine kubectl failure still trips `set -e` on the
           # assignment.
-          conds=$(kubectl --context "$CTX" get devenvironment "$TEST_ENV" -o jsonpath='{.status.readyServices} {.status.totalServices} {.status.conditions[?(@.type=="Available")].status} {.status.conditions[?(@.type=="Degraded")].status}')
+          conds=$(kubectl --context "$CTX" -n default get devenvironment "$TEST_ENV" -o jsonpath='{.status.readyServices} {.status.totalServices} {.status.conditions[?(@.type=="Available")].status} {.status.conditions[?(@.type=="Degraded")].status}')
           read -r R T AV DG <<< "$conds"
           [ "$R" = "$T" ] || fail "ready=$R total=$T"
           [ "$AV" = "True" ] || fail "Available=$AV"
@@ -559,26 +561,12 @@ jobs:
             echo "| Available / Degraded | $AV / $DG |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Teardown is part of the operator's contract, so proving it is part of
-      # the validation.
-      - name: Prove teardown, and remove the test environment
-        if: always()
-        run: |
-          set -euo pipefail
-          [ -n "${TEST_ENV:-}" ] || { echo "no test environment was created"; exit 0; }
-          kubectl --context "$CTX" delete devenvironment "$TEST_ENV" --ignore-not-found --timeout=180s
-          for i in $(seq 1 40); do
-            kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1 || break
-            sleep 3
-          done
-          if kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1; then
-            echo "::error::namespace $TEST_ENV was not reclaimed; the finalizer did not release"
-            exit 1
-          fi
-          echo "namespace reclaimed, finalizer released"
-
-      # Before anything is cleaned up. The operator stays installed, but the
-      # test environment's namespace, pods and events do not survive teardown.
+      # Declared BEFORE teardown on purpose. Steps run in declaration order
+      # regardless of their `if`, so with this below the teardown step the
+      # namespace, its pods and its events were already deleted by the time
+      # `describe` ran — destroying exactly the evidence that explains why the
+      # environment never reached Ready. The operator itself stays installed
+      # either way.
       - name: Diagnostics on failure
         if: failure()
         run: |
@@ -593,11 +581,29 @@ jobs:
           kubectl --context "$CTX" -n "$NS" get events --sort-by=.lastTimestamp
           if [ -n "${TEST_ENV:-}" ]; then
             echo "--- test environment $TEST_ENV ---"
-            kubectl --context "$CTX" describe devenvironment "$TEST_ENV"
+            kubectl --context "$CTX" -n default describe devenvironment "$TEST_ENV"
             kubectl --context "$CTX" -n "$TEST_ENV" get deploy,svc,pvc,pods -o wide
             kubectl --context "$CTX" -n "$TEST_ENV" describe pods
             kubectl --context "$CTX" -n "$TEST_ENV" get events --sort-by=.lastTimestamp
           fi
+
+      # Teardown is part of the operator's contract, so proving it is part of
+      # the validation.
+      - name: Prove teardown, and remove the test environment
+        if: always()
+        run: |
+          set -euo pipefail
+          [ -n "${TEST_ENV:-}" ] || { echo "no test environment was created"; exit 0; }
+          kubectl --context "$CTX" -n default delete devenvironment "$TEST_ENV" --ignore-not-found --timeout=180s
+          for i in $(seq 1 40); do
+            kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1 || break
+            sleep 3
+          done
+          if kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1; then
+            echo "::error::namespace $TEST_ENV was not reclaimed; the finalizer did not release"
+            exit 1
+          fi
+          echo "namespace reclaimed, finalizer released"
 
   # Only a promotion to main produces a release artifact set.
   release:
