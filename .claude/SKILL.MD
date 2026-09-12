@@ -210,7 +210,12 @@ spec:
   owner: live-verification
   storage: { size: 128Mi }
   services:
-    - { name: redis, image: redis:7-alpine, port: 6379 }
+    # mountPath is required, not decoration. picard's default StorageClass is
+    # local-path with WaitForFirstConsumer, so a PVC nothing mounts stays
+    # Pending forever — while the environment still reports Ready 1/1. Without
+    # it, the "PVC binds" assertion below fails on every single run, which
+    # trains whoever runs this gate to ignore a failing assertion.
+    - { name: redis, image: redis:7-alpine, port: 6379, mountPath: /data }
 YAML
 ```
 
@@ -234,9 +239,15 @@ kubectl --context "$CTX" delete devenvironment "$ENV" --ignore-not-found
 helm uninstall kado-operator -n kado-operator-system --kube-context "$CTX"
 # helm uninstall does NOT remove the namespace it created.
 kubectl --context "$CTX" delete ns kado-operator-system --ignore-not-found
-# Side-loaded images accumulate on every node across runs.
-k3d image rm -c picard "docker.io/partofaplan/kado-operator:sha-$SHA" 2>/dev/null || true
-docker image rm "docker.io/partofaplan/kado-operator:sha-$SHA" 2>/dev/null || true
+# Side-loaded images accumulate on every node across runs. There is no
+# `k3d image rm` — k3d v5 only has `image import` — so prune through the
+# nodes' own container runtime. Do not silence this: a swallowed failure here
+# is why images piled up unnoticed.
+IMG="docker.io/partofaplan/kado-operator:sha-$SHA"
+for n in $(docker ps --format '{{.Names}}' | grep k3d-picard); do
+  docker exec "$n" crictl rmi "$IMG" 2>/dev/null || true   # serverlb has no runtime
+done
+docker image rm "$IMG" || true
 ```
 
 Uninstalling the release removes the CRD too, because the chart templates it
@@ -247,12 +258,23 @@ gather diagnostics and post them to the merge request with `gh pr comment`
 *before* running step 5 — the namespace, the pods and their events all
 disappear with teardown.
 
+If the failure happened **before** step 3, `$ENV` does not exist yet: run only
+the operator-namespace commands. Running the `$ENV` ones with an empty variable
+errors on `describe`, and silently targets the `default` namespace for the
+rest — posting unrelated pods and stale events to the merge request labelled as
+the environment namespace.
+
 ```bash
 ENV_NS="$ENV"
 helm --kube-context "$CTX" -n kado-operator-system history kado-operator
 helm --kube-context "$CTX" -n kado-operator-system status kado-operator
-kubectl --context "$CTX" -n kado-operator-system logs deploy/kado-operator --tail=200
-kubectl --context "$CTX" -n kado-operator-system logs deploy/kado-operator --previous --tail=200 || true
+# Select by label, not by deployment: with an old and a new pod present,
+# `logs deploy/...` picks one arbitrarily and usually prints the OLD healthy
+# one, which reads as "no problem here".
+kubectl --context "$CTX" -n kado-operator-system logs \
+  --selector app.kubernetes.io/name=kado-operator --prefix --tail=200
+kubectl --context "$CTX" -n kado-operator-system logs \
+  --selector app.kubernetes.io/name=kado-operator --prefix --previous --tail=200 || true
 kubectl --context "$CTX" -n kado-operator-system describe pods
 kubectl --context "$CTX" describe devenvironment "$ENV"
 kubectl --context "$CTX" get devenvironment "$ENV" -o yaml
@@ -291,8 +313,9 @@ you are claiming in the merge request, so the reviewer can check it rather than
 take your word for it. Claiming an exemption that does not apply is the same
 process failure as skipping the gate outright.
 
-Everything in that merge request already passed this gate on its way into
-`develop`, because a merge request is the only way in. Re-running it would
+Everything in that merge request that could affect cluster behaviour already
+passed this gate on its way into `develop`, because a merge request is the only
+way in and only documentation is exempt from the gate. Re-running it would
 re-verify verified code at exactly the wrong moment — a promotion to `main`
 cuts a MAJOR and publishes a release, and wiring a disposable dev cluster into
 the release path makes releases fail for reasons that have nothing to do with
@@ -315,7 +338,9 @@ This is decided mechanically, not by judgement:
 # Counted rather than tested with `grep -qv`: some grep builds — ugrep, which
 # is a common `grep` alias on macOS — return the wrong exit status for -q
 # combined with -v, and would silently report every change as exempt.
-changed=$(git diff --name-only origin/develop...HEAD)
+# Diff against the merge request's BASE, which is `main` for a hotfix.
+BASE="${BASE:-origin/develop}"
+changed=$(git diff --name-only "$BASE"...HEAD)
 # -i matters: this repo's own rules live in .claude/SKILL.MD, uppercase.
 non_md=$(printf '%s\n' "$changed" | grep -civE '\.md$' || true)
 if [ "${non_md:-0}" -gt 0 ]; then
@@ -328,7 +353,11 @@ fi
 
 One `.go`, one chart template, one line of `Makefile`, one file under
 `config/` or `.github/`, and the gate applies to the whole merge request. There
-is no "mostly documentation". Note that `.claude/SKILL.MD` is itself a `.md`
+is no "mostly documentation".
+
+The documentation exemption wins over the hotfix rule: a `hotfix/*` branch that
+changes only `.md` files is exempt, because it still cannot alter what the
+operator does. A hotfix that changes anything else runs the gate. Note that `.claude/SKILL.MD` is itself a `.md`
 file: changing the rules is exempt, because it changes how people work rather
 than what the operator does.
 
@@ -396,7 +425,8 @@ or released that did not pass an independent review.
 
 - **Never open a merge request before the Definition of Done is met.**
 - **Never merge a change that has not been verified on a live cluster,** except
-  a promotion of `develop` into `main`, which is exempt by design.
+  under the two documented exemptions: a promotion of `develop` into `main`,
+  and a change where every modified file is a `.md`.
 - **Never let a failed verification wipe the cluster before its logs and events
   have been posted to the merge request.**
 - **Never leave `picard` dirty** — the gate cleans up on success and on failure.
