@@ -105,7 +105,7 @@ digest it published in its job summary.
 > the `latest` image, which moves on every publish.
 
 ```bash
-helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \
+helm install kado-operator oci://ghcr.io/partofaplan/charts/kado-operator \
   --namespace kado-operator-system --create-namespace
 ```
 

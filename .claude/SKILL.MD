@@ -842,14 +842,26 @@ time, per [Versioning](#two-consequences-worth-knowing).
 - Service type `ClusterIP` by default; anything else is opt-in.
 - Guard optional CRD-dependent resources (e.g. `ServiceMonitor`) behind a flag.
 
-### Install from Docker Hub (OCI)
+### Install the published chart (OCI)
+
+The chart is published to **GHCR**, not Docker Hub, and this is not cosmetic.
+`helm push chart.tgz oci://host/ns` lands the chart at
+`host/ns/<chart name>:<version>`. On Docker Hub that resolves to
+`partofaplan/kado-operator:<version>` — the exact repository and tag the image
+uses — so the chart would replace the image manifest and every install would
+then `ImagePullBackOff` on the chart's own `appVersion`. Docker Hub allows only
+two path components, so there is no sibling path to move to, and renaming the
+chart would rename every resource it creates, because `.Chart.Name` drives
+`kado-operator.fullname`. GHCR supports deep paths.
 
 ```bash
-helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \
-  --version 0.1.0 \
+helm install kado-operator oci://ghcr.io/partofaplan/charts/kado-operator \
+  --version 1.0.0 \
   --namespace kado-operator-system \
   --create-namespace
 ```
+
+The image stays on Docker Hub. Only the chart moved.
 
 ### Install from a local checkout
 
