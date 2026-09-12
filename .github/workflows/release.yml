@@ -129,6 +129,14 @@ jobs:
           helm package charts/kado-operator \
             --version "$V" --app-version "$V" --destination dist/
           make build-installer IMG="${IMAGE}:${V}"
+          # A stable-named copy alongside the versioned one. A chart filename
+          # carries its version by convention, which makes
+          # releases/latest/download/<name> — the URL that never goes stale —
+          # unspellable for it. install.yaml already has that property for
+          # free, so without this copy the two documented install paths would
+          # disagree: one always current, one pinned to whatever release the
+          # docs happened to be written against.
+          cp "dist/kado-operator-${V}.tgz" dist/kado-operator-chart.tgz
           cp config/crd/bases/devenv.aviture.dev_devenvironments.yaml dist/crd.yaml
           cp config/samples/devenv_v1alpha1_devenvironment.yaml dist/devenvironment-sample.yaml
           ls -la dist/
@@ -151,6 +159,13 @@ jobs:
           echo "chart renders:${rendered}"
           echo "$rendered" | grep -q "${IMAGE}:${V}" \
             || { echo "::error::packaged chart does not reference ${IMAGE}:${V}"; exit 1; }
+
+          # install.yaml is the other artifact users apply, generated separately
+          # by `make build-installer`. It was correct by construction — so was
+          # the chart's CRD copy, until helm-crds drift made that worth checking.
+          grep -q "${IMAGE}:${V}" dist/install.yaml \
+            || { echo "::error::install.yaml does not reference ${IMAGE}:${V}"; exit 1; }
+          echo "install.yaml references ${IMAGE}:${V}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -244,7 +259,8 @@ jobs:
             echo "| File | What it is |"
             echo "| --- | --- |"
             echo "| \`install.yaml\` | CRD, RBAC and the operator Deployment in one manifest |"
-            echo "| \`kado-operator-${V}.tgz\` | The Helm chart — \`helm install\` takes its URL directly |"
+            echo "| \`kado-operator-${V}.tgz\` | The Helm chart, version-pinned |"
+            echo "| \`kado-operator-chart.tgz\` | The same chart under a stable name, so \`releases/latest/download/kado-operator-chart.tgz\` always resolves to the newest |"
             echo "| \`crd.yaml\` | The \`DevEnvironment\` CRD on its own |"
             echo "| \`devenvironment-sample.yaml\` | A sample environment to apply |"
             echo
@@ -293,5 +309,6 @@ jobs:
           files: |
             dist/install.yaml
             dist/kado-operator-${{ steps.ver.outputs.version }}.tgz
+            dist/kado-operator-chart.tgz
             dist/crd.yaml
             dist/devenvironment-sample.yaml

@@ -850,7 +850,7 @@ in step with the image:
 
 ```bash
 helm install kado-operator \
-  https://github.com/partofaplan/kado-operator/releases/download/v1.0.0/kado-operator-1.0.0.tgz \
+  https://github.com/partofaplan/kado-operator/releases/latest/download/kado-operator-chart.tgz \
   --namespace kado-operator-system --create-namespace
 ```
 
