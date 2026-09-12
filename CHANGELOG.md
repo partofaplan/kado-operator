@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `readinessProbe` on a service spec: a standard Kubernetes probe, with an
+  empty handler (`readinessProbe: {}`) filled in as a TCP check against the
+  service's own port. Without a probe Kubernetes calls a running container
+  ready the instant it starts, so `readyServices` counted containers that had
+  been *started* rather than services that work — a database still starting up,
+  or one about to crash, counted as ready. Omitting the field leaves behaviour
+  unchanged.
+
 ### Changed
 
 - No stage before a merge touches a cluster. The `integration` job is now

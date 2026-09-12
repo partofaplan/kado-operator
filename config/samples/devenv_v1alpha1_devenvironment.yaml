@@ -29,6 +29,10 @@ spec:
         POSTGRES_DB: appdb
         PGDATA: /var/lib/postgresql/data/pgdata
       mountPath: /var/lib/postgresql/data
+      # Empty handler: TCP connect to port 5432. Without a probe, postgres
+      # counts as ready the instant the process starts, before it accepts
+      # connections.
+      readinessProbe: {}
       resources:
         requests:
           cpu: 100m
@@ -40,6 +44,7 @@ spec:
     - name: redis
       image: redis:7-alpine
       port: 6379
+      readinessProbe: {}
       resources:
         requests:
           cpu: 50m

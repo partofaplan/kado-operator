@@ -418,7 +418,32 @@ func (r *DevEnvironmentReconciler) container(env *devenvv1alpha1.DevEnvironment,
 	if spec.MountPath != "" && env.Spec.Storage != nil {
 		c.VolumeMounts = []corev1.VolumeMount{{Name: sharedVolumeName, MountPath: spec.MountPath}}
 	}
+
+	c.ReadinessProbe = readinessProbe(spec)
 	return c
+}
+
+// readinessProbe renders the service's probe, defaulting an empty handler to a
+// TCP check against the service's own port.
+//
+// The default exists because the empty handler is otherwise a silent no-op:
+// Kubernetes accepts a Probe with no action and never runs anything, so
+// `readinessProbe: {}` would look like it was doing something while changing
+// nothing. A TCP check on the port the service already has to declare is both
+// the obvious intent and correct for most databases, caches and queues.
+func readinessProbe(spec *devenvv1alpha1.ServiceSpec) *corev1.Probe {
+	if spec.ReadinessProbe == nil {
+		return nil
+	}
+	// Copied because the spec belongs to the caller's object; filling the
+	// handler in place would mutate the DevEnvironment we were handed.
+	probe := spec.ReadinessProbe.DeepCopy()
+	if probe.ProbeHandler == (corev1.ProbeHandler{}) {
+		probe.ProbeHandler = corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstrFromInt32(spec.Port)},
+		}
+	}
+	return probe
 }
 
 func (r *DevEnvironmentReconciler) volumes(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []corev1.Volume {
