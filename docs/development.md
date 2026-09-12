@@ -25,19 +25,31 @@ hotfix/*   ────────────────MR──▶ main
 ```
 
 Every arrow is a merge request, and every merge request is reviewed by someone
-other than its author. Four gates, in order, no exceptions:
+other than its author. Five gates, in order, no exceptions:
 
 1. **Branch** — one loop, one feature branch cut from current `develop`.
 2. **Done** — `make test`, `make test-integration` and `make lint` all pass,
-   regeneration leaves no diff, and CI is green on the pushed branch.
-3. **Review** — a merge request, evaluated by a different agent than the one
-   that wrote the change. The reviewer works from the diff, verifies the
-   Definition of Done independently rather than trusting it, and returns
-   APPROVE or REQUEST CHANGES.
-4. **Merge** — only on approval. The merge is what authorises the version.
+   regeneration leaves no diff, and CI is green on the open merge request.
+3. **Verify** — deploy or upgrade the operator on the live `picard` cluster
+   from an image built from the merge request's head commit, prove it
+   provisions a test `DevEnvironment` to Ready, prove teardown reclaims the
+   namespace, then wipe everything. On failure an agent posts the operator
+   logs, pod descriptions and namespace-scoped events to the merge request
+   *before* teardown destroys them.
+4. **Review** — evaluated by a different agent than the one that wrote the
+   change. The reviewer works from the diff, verifies the Definition of Done
+   independently rather than trusting it, and returns APPROVE or REQUEST
+   CHANGES.
+5. **Merge** — only on approval. The merge is what authorises the version.
+
+Two exemptions from gate 3, and only two: a promotion of `develop` into `main`
+(already verified on the way into `develop`, and a release must not depend on a
+disposable dev cluster), and documentation-only changes. A `hotfix/*` branch
+merging into `main` is **not** exempt — it never passes through `develop`, so
+it has never been verified.
 
 Nothing is tagged or released that did not come through an approved merge
-request. The full rules live in `.claude/SKILL.MD`.
+request. The full rules live in `.claude/SKILL.MD`, which is authoritative.
 
 The `git flow` CLI is optional — plain git works the same way:
 
