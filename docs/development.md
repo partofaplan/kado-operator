@@ -28,25 +28,35 @@ Every arrow is a merge request, and every merge request is reviewed by someone
 other than its author. Five gates, in order, no exceptions:
 
 1. **Branch** — one loop, one feature branch cut from current `develop`.
-2. **Done** — `make test`, `make test-integration` and `make lint` all pass,
-   regeneration leaves no diff, and CI is green on the open merge request.
-3. **Verify** — deploy or upgrade the operator on the live `picard` cluster
-   from an image built from the merge request's head commit, prove it
-   provisions a test `DevEnvironment` to Ready, prove teardown reclaims the
-   namespace, then wipe everything. On failure an agent posts the operator
-   logs, pod descriptions and namespace-scoped events to the merge request
-   *before* teardown destroys them.
-4. **Review** — evaluated by a different agent than the one that wrote the
+2. **Done** — `make test` and `make lint` pass, regeneration leaves no diff,
+   and CI is green on the open merge request.
+3. **Review** — evaluated by a different agent than the one that wrote the
    change. The reviewer works from the diff, verifies the Definition of Done
    independently rather than trusting it, and returns APPROVE or REQUEST
    CHANGES.
-5. **Merge** — only on approval. The merge is what authorises the version.
+4. **Merge** — only on approval. The merge is what authorises the version.
+5. **Validate** — automatic, after the merge. CI runs the integration suite
+   against an ephemeral cluster, tags and publishes, then upgrades the
+   published image onto the live `picard` cluster and proves it provisions a
+   test `DevEnvironment` to Ready and tears it down again.
 
-Two exemptions from gate 3, and only two: a promotion of `develop` into `main`
-(already verified on the way into `develop`, and a release must not depend on a
-disposable dev cluster), and changes where **every** modified file is a `*.md`
-file. A `hotfix/*` branch merging into `main` is **not** exempt — it never
-passes through `develop`, so it has never been verified.
+**Nothing before the merge touches a cluster.** A feature branch must not
+create a cluster, apply a CRD, or deploy the operator anywhere — not to
+`picard`, not to your own cluster as a gate, and not to a throwaway cluster
+inside a CI runner. A pull request runs only the cluster-free layers: lint,
+codegen, unit tests, envtest and a Dockerfile build. (`envtest` is not an
+exception: it starts an API server and etcd as local binaries, with no
+container runtime and no nodes.)
+
+That is a deliberate trade. A change that breaks the reconciler now merges
+before anything catches it. What protects the line is that `version` depends on
+the integration job, so a failing post-merge run cuts no version and publishes
+no image — `develop` is left with a bad commit and no release, and the fix goes
+forward through a normal loop, or the commit is reverted.
+
+`make test-integration` still works against whatever context you have selected.
+It is a tool, not a gate: reach for it when you are changing reconciler
+behaviour and want the feedback early, against a cluster of your own.
 
 The documentation exemption is decided mechanically from the diff, not by
 judgement, and the claim is stated in the merge request so the reviewer can
@@ -146,6 +156,25 @@ kubectl config use-context <other-cluster>
 make test-integration
 ```
 
+## picard tracks develop
+
+`picard` is upgraded automatically on every merge into `develop`, by the
+`verify-picard` job in `ci.yml`, and the operator is **never uninstalled** —
+each merge upgrades the release in place, which is also the path real users
+take and catches migration failures a clean install hides. Only the test
+`DevEnvironment` is temporary: it is created, asserted against, and deleted.
+
+So `picard` is not a cluster to keep anything on. Whatever is on `develop` is
+what is running, and every validation run deletes its own test environment.
+
+A failed validation leaves `picard` on the broken revision on purpose — a Helm
+rollback would revert the failure before diagnostics could be taken, and then
+report `deployed`. Merge the fix, or roll back by hand:
+
+```bash
+helm rollback kado-operator -n kado-operator-system --kube-context picard
+```
+
 ## Deploying into the cluster
 
 Running the image in-cluster, rather than `make run` on your host, is what
@@ -181,9 +210,9 @@ helm upgrade --install kado-operator ./charts/kado-operator \
 
 ```bash
 gh workflow run deploy.yml \
-  -f image_tag=develop \
+  -f image_tag=latest \
   -f namespace=kado-operator-system \
-  -f kube_context=k3d-picard \
+  -f kube_context=picard \
   -f dry_run=false
 ```
 
@@ -198,9 +227,12 @@ Two things about that runner are load-bearing:
   Desktop), which a non-login zsh does not include, so the workflow adds it to
   `$GITHUB_PATH` before anything else. Without that, every step fails with
   "command not found".
-- **Context.** The machine has both `k3d-picard` and `rancher-desktop`
-  contexts. Every `kubectl` and `helm` call passes `--kube-context` explicitly
-  so a deploy cannot land in the wrong cluster.
+- **Context.** The machine has both `picard` and `rancher-desktop` contexts.
+  Every `kubectl` and `helm` call passes `--kube-context` explicitly so a
+  deploy cannot land in the wrong cluster. Note the name: the kubectl context
+  and the k3d cluster are both `picard`, while `k3d-picard` is only the
+  kubeconfig cluster-entry name and the node-container prefix —
+  `kubectl --context k3d-picard` fails with "no context exists".
 
 The workflow preflights before touching the cluster: the context exists, the
 image tag is actually published, and the CRD is not already owned by something
@@ -248,7 +280,7 @@ both; `make run` will not catch the difference because it uses your kubeconfig.
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `ci.yml` | pull requests into `develop`/`main`, and pushes to those two branches | lint, unit + envtest, generated-code check, a two-platform Dockerfile build, and integration on an ephemeral cluster; on `develop`/`main` also assign the version, tag, publish the image, and on `main` publish the release |
+| `ci.yml` | pull requests into `develop`/`main`, and pushes to those two branches | **On a pull request:** lint, unit + envtest, generated-code check and a two-platform Dockerfile build — nothing that touches a cluster. **On a push to `develop`/`main`:** additionally the integration suite on an ephemeral cluster, then assign the version, tag and publish the image; on `develop` also upgrade `picard` and validate it; on `main` publish the release |
 
 Feature and hotfix branches are covered by the pull request trigger, which
 tests the merge result rather than the branch tip. They are deliberately not in
