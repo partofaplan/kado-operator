@@ -8,6 +8,30 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- No stage before a merge touches a cluster. The `integration` job is now
+  `push`-only, so a pull request runs only lint, code generation, unit tests,
+  envtest and a Dockerfile build — it no longer creates a k3d cluster inside
+  the runner or applies a CRD to it. `make test-integration` is correspondingly
+  no longer part of the Definition of Done; it remains available as a tool.
+- Added the `verify-picard` job: after a merge into `develop` is versioned and
+  published, the published image is upgraded onto the live `picard` cluster on
+  the self-hosted runner and proven to provision a test `DevEnvironment` to
+  Ready, with teardown asserted. The operator is **not** uninstalled afterwards
+  — `picard` tracks `develop` and each merge upgrades the release in place.
+  Only the test environment is temporary. Runs on `develop` only.
+- The gate model is now Branch → Done → Review → Merge → Validate, with
+  validation after the merge rather than a manual cluster deploy before it.
+  Both Gate 3 exemptions (`develop`→`main` and documentation-only) are gone
+  along with the manual gate that needed them.
+- Corrected the `picard` kube context name in `deploy.yml`'s `kube_context`
+  default and in `docs/development.md`. The context and the k3d cluster are
+  both `picard`; `k3d-picard` is only the kubeconfig cluster-entry name, so the
+  old default failed `deploy.yml`'s own preflight.
+- Branch protection on `develop` and `main` now requires `Image builds` instead
+  of `Integration`. `Integration` no longer runs on pull requests, and GitHub
+  counts a skipped check as satisfied — leaving it required gave false
+  assurance while the only new pre-merge signal went unguarded.
+
 - Image tags reduced to two kinds: the immutable `MAJOR.MINOR` version, and
   `latest` pointing at whatever was published most recently. Per-commit
   (`sha-<short>`) and floating branch tags are no longer published — every

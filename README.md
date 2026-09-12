@@ -167,8 +167,13 @@ commit, publishes the multi-arch image and moves `latest`, pushes the chart to
 the OCI registry, and creates a GitHub release with `install.yaml` and the
 chart archive attached.
 
-Every change reaches `develop` the same way — a feature branch, all test
-layers green, then a merge request reviewed by someone other than its author.
+Every change reaches `develop` the same way — a feature branch, the
+cluster-free test layers green, then a merge request reviewed by someone other
+than its author. **Nothing before the merge touches a cluster:** a pull request
+runs lint, codegen, unit tests, envtest and a Dockerfile build, and every stage
+that needs a real cluster runs automatically *after* the merge — the
+integration suite on an ephemeral cluster, then an upgrade of the published
+image onto the live `picard` cluster to prove it provisions a real environment.
 See [the development workflow](docs/development.md) for the full set of gates.
 
 CI needs one repository secret, `DOCKERHUB_TOKEN`: a Docker Hub access token
@@ -188,9 +193,17 @@ requests from forks cannot read secrets, so those runs build without pushing.
 
 ```bash
 make test                    # unit + envtest, no cluster required
+make lint
+```
+
+`make test` and `make lint` are what gate a merge request. The integration
+suite needs a cluster, so it is not a pre-merge gate — CI runs it
+automatically after a merge into `develop`. Run it yourself whenever the
+feedback would help, against a cluster of your own:
+
+```bash
 make test-integration        # full lifecycle against the current kubectl context
 make test-integration-local  # ...or spin up a local cluster first
-make lint
 ```
 
 ## License

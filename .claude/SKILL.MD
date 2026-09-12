@@ -51,7 +51,7 @@ confusing error.
 
 ---
 
-## The Loop: Branch → Done → Verify → Review → Merge
+## The Loop: Branch → Done → Review → Merge → Validate
 
 Work proceeds in **loops**. One loop is one unit of change: a feature, a fix, a
 refactor. Every loop follows the same five gates, in order, with no step skipped
@@ -63,26 +63,59 @@ and no step reordered. These are requirements, not suggestions.
      └───────────────────────────┬───────────────────────────┘
                                  ▼
      ┌─ 2. DONE ────────────────────────────────────────────┐
-     │  every test layer passes; merge request opened;       │
-     │  every CI check green                                 │
+     │  every cluster-free test layer passes; merge request  │
+     │  opened; every CI check green                         │
      └───────────────────────────┬───────────────────────────┘
                                  ▼
-     ┌─ 3. VERIFY ON PICARD ────────────────────────────────┐
-     │  deploy/upgrade the operator on the live cluster,     │
-     │  prove it provisions a test environment, then wipe    │
-     │  it. On failure: an agent posts logs + events to      │
-     │  the merge request.                                   │
-     │  Two exemptions, listed under Gate 3.                 │
-     └───────────────────────────┬───────────────────────────┘
-                                 ▼
-     ┌─ 4. REVIEW ──────────────────────────────────────────┐
+     ┌─ 3. REVIEW ──────────────────────────────────────────┐
      │  evaluated by a DIFFERENT agent than the author       │
      └───────────────────────────┬───────────────────────────┘
                                  ▼
-     ┌─ 5. MERGE ───────────────────────────────────────────┐
-     │  only on approval → CI tags the version → release     │
+     ┌─ 4. MERGE ───────────────────────────────────────────┐
+     │  only on approval → CI tags the version → publishes   │
+     └───────────────────────────┬───────────────────────────┘
+                                 ▼
+     ┌─ 5. VALIDATE ────────────────────────────────────────┐
+     │  AUTOMATIC, after the merge. Integration suite on an  │
+     │  ephemeral cluster, then the published image is       │
+     │  upgraded onto picard and proven to provision a test  │
+     │  environment. Nothing to run by hand.                 │
      └───────────────────────────────────────────────────────┘
 ```
+
+### Nothing before the merge touches a cluster
+
+This is the rule that shapes everything below. **A feature branch must not
+create a cluster, apply a CRD, or deploy the operator anywhere** — not to
+`picard`, not to a colleague's cluster, and not to a throwaway cluster inside a
+CI runner.
+
+What a pull request runs is therefore exactly the cluster-free set: lint, code
+generation, unit tests, envtest, and a Dockerfile build. `envtest` is not an
+exception — it starts an API server and etcd as local binaries, with no
+container runtime, no nodes and no kubeconfig pointing anywhere.
+
+Everything that needs a real cluster happens **after** the merge, automatically,
+in [Gate 5](#gate-5--automatic-post-merge-validation).
+
+Know what this costs, because it is a deliberate trade and not a free one: a
+change that breaks the reconciler now merges into `develop` before anything
+catches it. Two different things can then fail, and only one of them is
+contained:
+
+- **`integration` fails.** `version` is gated on it, so no version is cut and
+  no image is published. `develop` carries a bad commit and no release.
+- **`verify-picard` fails.** This runs *after* `publish`, so by then the
+  version **was** cut, the image **was** pushed, and `latest` **was** moved.
+  The release exists and is bad. `picard` is also left on the broken revision.
+
+Either way the fix goes forward through a normal loop, and reverting is always
+available and often faster. Do not read the first bullet as covering both.
+
+`make test-integration` still exists and still works against whatever context
+you have selected. It is a tool, not a gate — reach for it deliberately when you
+are changing reconciler behaviour and want the feedback early, against a cluster
+of your own.
 
 ### Gate 1 — One branch per loop
 
@@ -101,9 +134,10 @@ Branch names describe the change, not the author or the tool:
 `hotfix/nil-deref-on-delete`.
 
 Why this is a hard rule rather than a preference: every push to `develop` cuts a
-version and publishes an image. A commit made directly to `develop` is therefore
-a release, made without review, that cannot be undone without burning a version
-number. The feature branch is where work is reviewable and abandonable.
+version, publishes an image, and upgrades `picard`. A commit made directly to
+`develop` is therefore a release *and* a deployment, made without review, that
+cannot be undone without burning a version number. The feature branch is where
+work is reviewable and abandonable.
 
 Feature branches are short-lived and single-purpose: one loop, one branch, one
 merge request. Do not continue a finished loop's branch into the next loop, and
@@ -116,13 +150,12 @@ pushes, so the rule is enforced by the forge rather than by discipline alone.
 
 ### Gate 2 — Definition of Done
 
-A loop is **done** when the tests pass and CI agrees. Concretely, all of these
-MUST be true before the change moves on to verification:
+A loop is **done** when the cluster-free tests pass and CI agrees. All of these
+MUST be true before the change is offered for review:
 
 | Check | Command | Proves |
 | --- | --- | --- |
 | Unit + envtest | `make test` | Reconcile logic and the generated CRD schema |
-| Integration | `make test-integration` | Real cluster behaviour end to end |
 | Lint | `make lint` | No new correctness or style violations |
 | Generated code current | `make manifests generate helm-crds` leaves no diff | Committed CRDs match the Go types |
 | CI green | GitHub Actions, on the open merge request | It passes somewhere other than your machine |
@@ -137,288 +170,14 @@ Open the merge request once these pass:
 gh pr create --base develop --fill
 ```
 
-Gate 3 begins only after the merge request exists and every CI check on it is
-green — verifying a branch CI has already rejected wastes a cluster deploy on a
-change that cannot merge.
-
 If any check cannot pass for a defensible reason, say so explicitly in the merge
 request. Do not open one claiming done when it is not.
 
-### Gate 3 — Live verification on the picard cluster
-
-Unit tests, envtest and the integration suite all run the reconciler as a
-process. None of them proves the thing you actually ship — the built image,
-running under the chart's RBAC, inside a real cluster. This gate does.
-
-**Who runs it:** the agent driving the loop, by hand, using the commands below.
-There is no workflow for it yet. `deploy.yml` is *not* this gate and cannot be:
-it is `workflow_dispatch`-only by design (public repo, physical runner), and its
-preflight requires a published image tag, which a feature branch never has.
-Until a workflow exists, run this on a machine that can reach `picard` and hold
-the one-at-a-time rule by not starting a second run.
-
-**Who it applies to:** every merge request except the exemptions listed under
-[Which merges are exempt](#which-merges-are-exempt).
-
-`picard` is a disposable test cluster. This gate uninstalls whatever operator is
-on it and deletes the CRD, which deletes every `DevEnvironment` with it. Never
-run it against a cluster anyone depends on.
-
-Pin `--kube-context` on every command. This machine also has a
-`rancher-desktop` context, and `make uninstall` deletes the CRD on whatever
-context is current.
-
-**1. Build and side-load the image from the merge request's head commit.**
-Feature branches publish nothing to Docker Hub, so verifying a published tag
-would verify the wrong code. Tag by commit, not by PR number, so the image names
-exactly what was tested. This `sha-` prefix is a *local build identifier* only —
-it is never pushed, and the registry carries no sha tags (see
-[Versioning](#versioning-majorminor)):
-
-```bash
-SHA=$(git rev-parse --short HEAD)
-# Both the kubectl CONTEXT and the k3d CLUSTER are named `picard`, so CTX and
-# LOCAL_CLUSTER below take the same value. `k3d-picard` is neither: it is only
-# the kubeconfig cluster-entry name and the node-container prefix, which is why
-# `kubectl --context k3d-picard` fails with "no context exists". Confirm with
-# `kubectl config get-contexts` and `k3d cluster list` if either is reported
-# missing.
-CTX=picard
-
-# Gate 2 runs `make test-integration`, which depends on `make install` and
-# leaves a kustomize-applied CRD. Helm refuses to adopt it, so without this the
-# deploy below fails with an ownership error every time. This is the normal
-# state of the cluster after Gate 2, not an edge case.
-kubectl config use-context "$CTX"
-make uninstall ignore-not-found=true
-
-make cluster-load LOCAL_CLUSTER=picard IMAGE_TAG="sha-$SHA"
-```
-
-**2. Deploy, or upgrade in place if a release is already present.** An upgrade
-exercises the path real users take and catches migration failures a clean
-install hides.
-
-```bash
-helm upgrade --install kado-operator ./charts/kado-operator \
-  --kube-context "$CTX" \
-  --namespace kado-operator-system --create-namespace \
-  --set image.tag="sha-$SHA" \
-  --set image.pullPolicy=Never \
-  --wait --timeout 5m
-```
-
-**Do not pass `--rollback-on-failure` (or Helm 3's `--atomic`) here.** Rolling
-back is right for a deploy and wrong for a *verification*: it reverts the failure
-inside this step, before any diagnostics can be taken. After a rollback the
-failing pod is gone, `kubectl logs deploy/kado-operator` streams the previous
-healthy pod, and `helm status` reports `STATUS: deployed` — actively hiding the
-failure it just recovered from. On a first install it is worse: at revision 1
-there is nothing to roll back to, so Helm uninstalls, taking the CRD and every
-`DevEnvironment` with it. This gate wants the wreckage left exactly where it
-fell. `--wait` alone fails without cleaning up after itself, which is what we
-need.
-
-(`--wait` works on Helm 3 and 4. `--rollback-on-failure` is Helm 4 only —
-another reason not to use it here.)
-
-**3. Prove it actually works.** Deploying is not evidence; a running pod that
-reconciles nothing still reports Ready. Apply a *dedicated* test resource — not
-`config/samples/`, whose fixed name `team-alpha` collides with anything already
-on the cluster:
-
-```bash
-ENV="verify-$SHA"
-cat <<YAML | kubectl --context "$CTX" apply -f -
-apiVersion: devenv.aviture.dev/v1alpha1
-kind: DevEnvironment
-metadata: { name: $ENV, namespace: default }
-spec:
-  owner: live-verification
-  # Exercised so the ConfigMap path is covered: this renders a
-  # <env>-config ConfigMap that every service consumes via envFrom.
-  config:
-    LOG_LEVEL: debug
-  storage: { size: 128Mi }
-  services:
-    # mountPath is required, not decoration. picard's default StorageClass is
-    # local-path with WaitForFirstConsumer, so a PVC nothing mounts stays
-    # Pending forever — while the environment still reports Ready 1/1. Without
-    # it, the "PVC binds" assertion below fails on every single run, which
-    # trains whoever runs this gate to ignore a failing assertion.
-    - { name: redis, image: redis:7-alpine, port: 6379, mountPath: /data }
-    # A second service so "a Deployment and Service for EVERY service" is an
-    # assertion rather than a tautology at n=1.
-    - { name: postgres, image: postgres:16-alpine, port: 5432,
-        env: { POSTGRES_PASSWORD: verify, PGDATA: /var/lib/postgresql/data/pgdata } }
-YAML
-```
-
-Then assert, with a timeout:
-
-- the namespace `$ENV` is created
-- a Deployment and Service exist for **every** service in the spec (two here)
-- the `$ENV-config` ConfigMap exists and carries the spec's `config` values
-- the PVC binds
-- `status.phase` reaches `Ready` with `readyServices == totalServices`
-- `Available` is true and `Degraded` is false
-
-**4. Prove teardown works.** Delete the test resource and assert the namespace is
-reclaimed and the finalizer released. Cleanup is part of the operator's
-contract, so it is part of the verification.
-
-**5. Wipe.** The gate ends with no operator, no CRD and no test residue on the
-cluster:
-
-```bash
-kubectl --context "$CTX" delete devenvironment "$ENV" --ignore-not-found --timeout=180s
-
-# Order matters, and this check enforces it. The operator is the only thing
-# that removes its own finalizer, so uninstalling it while any DevEnvironment
-# still carries one strands that object permanently: the CR cannot finish
-# deleting, and the CRD deletion below then blocks forever on
-# `customresourcecleanup.apiextensions.k8s.io`. Recovering means patching the
-# finalizer off by hand. If the delete above timed out, do NOT continue —
-# reinstate the operator and let it drain, or clear the finalizer first:
-#   kubectl --context "$CTX" -n default patch devenvironment "$ENV" \
-#     --type=merge -p '{"metadata":{"finalizers":[]}}'
-remaining=$(kubectl --context "$CTX" get devenvironments -A --no-headers 2>/dev/null | wc -l | tr -d ' ')
-[ "$remaining" = "0" ] || { echo "refusing to uninstall: $remaining DevEnvironment(s) still present"; exit 1; }
-
-helm uninstall kado-operator -n kado-operator-system --kube-context "$CTX"
-# helm uninstall does NOT remove the namespace it created.
-kubectl --context "$CTX" delete ns kado-operator-system --ignore-not-found
-# Side-loaded images accumulate on every node across runs. There is no
-# `k3d image rm` — k3d v5 only has `image import` — so prune through the
-# nodes' own container runtime.
-# Skip serverlb by name rather than by swallowing its error, so a genuine
-# failure on a real node still surfaces. Silencing is what hid this step
-# failing entirely, twice.
-IMG="docker.io/partofaplan/kado-operator:sha-$SHA"
-for n in $(docker ps --format '{{.Names}}' | grep k3d-picard | grep -v serverlb); do
-  docker exec "$n" crictl rmi "$IMG"
-done
-docker image rm "$IMG" || true
-```
-
-Uninstalling the release removes the CRD too, because the chart templates it
-rather than shipping it in `crds/`.
-
-**On failure: collect evidence, then wipe.** If any step fails, an agent MUST
-gather diagnostics and post them to the merge request with `gh pr comment`
-*before* running step 5 — the namespace, the pods and their events all disappear
-with teardown.
-
-If the failure happened **before** step 3, `$ENV` does not exist yet: run only
-the operator-namespace commands. Running the `$ENV` ones with an empty variable
-errors on `describe`, and silently targets the `default` namespace for the rest —
-posting unrelated pods and stale events to the merge request labelled as the
-environment namespace.
-
-```bash
-ENV_NS="$ENV"
-helm --kube-context "$CTX" -n kado-operator-system history kado-operator
-helm --kube-context "$CTX" -n kado-operator-system status kado-operator
-# Select by label, not by deployment: with an old and a new pod present,
-# `logs deploy/...` picks one arbitrarily and usually prints the OLD healthy
-# one, which reads as "no problem here".
-kubectl --context "$CTX" -n kado-operator-system logs \
-  --selector app.kubernetes.io/name=kado-operator --prefix --tail=200
-kubectl --context "$CTX" -n kado-operator-system logs \
-  --selector app.kubernetes.io/name=kado-operator --prefix --previous --tail=200 || true
-kubectl --context "$CTX" -n kado-operator-system describe pods
-kubectl --context "$CTX" describe devenvironment "$ENV"
-kubectl --context "$CTX" get devenvironment "$ENV" -o yaml
-kubectl --context "$CTX" -n "$ENV_NS" get deploy,svc,pvc,pods -o wide
-kubectl --context "$CTX" -n "$ENV_NS" describe pods
-kubectl --context "$CTX" -n "$ENV_NS" get events --sort-by=.lastTimestamp
-kubectl --context "$CTX" -n kado-operator-system get events --sort-by=.lastTimestamp
-```
-
-`helm history` is in that list deliberately: it is the only one of these that
-reveals a failed revision. Note also that a cluster-wide
-`kubectl get events -A | tail` is nearly useless — on a real cluster the tail is
-almost entirely `kube-system` noise. Scope events to the namespaces you care
-about.
-
-The comment must state which step failed, what was expected and what happened.
-"Deployment failed" is not a diagnosis; handing the author the evidence is the
-entire point of this gate.
-
-Then run step 5 anyway. A failed verification must not leave the cluster dirty
-for the next merge request.
-
-**The gate fails if it cannot run.** If `picard` is unreachable, that is a
-failure, not a skip. A gate that silently passes when it cannot execute is worse
-than no gate.
-
-Only one verification may run at a time: `picard` is a single shared cluster, and
-two concurrent runs would delete each other's resources.
-
-#### Which merges are exempt
-
-**This list is authoritative. There are two exemptions and no others.**
-
-1. **`develop` → `main`.** Everything in that merge request that could affect
-   cluster behaviour already passed this gate on its way into `develop`, because
-   a merge request is the only way in and only documentation is exempt from the
-   gate. Re-running it would re-verify verified code at exactly the wrong moment
-   — a promotion to `main` cuts a MAJOR and publishes a release, and wiring a
-   disposable dev cluster into the release path makes releases fail for reasons
-   that have nothing to do with the release.
-
-2. **Documentation-only changes.** A change that touches nothing but `*.md` files
-   cannot alter what the operator does in a cluster, and requiring a serialized
-   cluster deploy to merge a typo fix is how a rule stops being followed. Note
-   that `.claude/SKILL.MD` is itself a `.md` file: changing the rules is exempt,
-   because it changes how people work rather than what the operator does.
-
-**`hotfix/*` → `main` is NOT exempt.** A hotfix branches from `main` and merges
-back to `main` without ever passing through `develop`, so it has never been
-verified. It is also, by the nature of hotfixes, the change most likely to have
-been written in a hurry. It runs the full gate — unless it changes only `.md`
-files, because exemption 2 applies to every branch type equally.
-
-Every exemption is decided from the diff, never from intent. State which one you
-are claiming in the merge request, so the reviewer can check it rather than take
-your word for it. Claiming an exemption that does not apply is the same process
-failure as skipping the gate outright.
-
-Exemption 2 is decided mechanically, not by judgement:
-
-```bash
-# Exempt only if EVERY changed file is a .md file.
-# Counted rather than tested with `grep -qv`: some grep builds — ugrep, which
-# is a common `grep` alias on macOS — return the wrong exit status for -q
-# combined with -v, and would silently report every change as exempt.
-# Diff against the merge request's BASE, which is `main` for a hotfix.
-BASE="${BASE:-origin/develop}"
-changed=$(git diff --name-only "$BASE"...HEAD)
-# -i matters: this repo's own rules live in .claude/SKILL.MD, uppercase.
-non_md=$(printf '%s\n' "$changed" | grep -civE '\.md$' || true)
-if [ "${non_md:-0}" -gt 0 ]; then
-  echo "Gate 3 applies — $non_md non-documentation file(s) changed"
-  printf '%s\n' "$changed" | grep -ivE '\.md$' | sed 's/^/  /'
-else
-  echo "Documentation-only — Gate 3 exempt"
-fi
-```
-
-One `.go`, one chart template, one line of `Makefile`, one file under `config/`
-or `.github/`, and the gate applies to the whole merge request. There is no
-"mostly documentation".
-
-Both exemptions skip **only** Gate 3. CI must still be green and the merge
-request must still be reviewed by a different agent. Nothing merges unreviewed.
-
-### Gate 4 — Independent agent review
+### Gate 3 — Independent agent review
 
 Every merge into `develop` MUST go through a merge request. Every merge from
 `develop` into `main` MUST go through a merge request. There are no direct merges
 and no exceptions for small changes.
-
-Review comes after live verification, so the reviewer can see whether the change
-actually worked in a cluster rather than only whether the tests passed.
 
 **The merge request MUST be evaluated by a different agent than the one that
 wrote the change.** This is the central rule of this gate.
@@ -429,6 +188,12 @@ the ones it will miss while reading. Worse, it already believes the change is
 correct — it wrote it — so it reads to confirm rather than to falsify. A separate
 agent starts from the diff with no attachment to the approach and no memory of
 why a shortcut seemed reasonable at the time.
+
+This gate carries more weight than it used to. It is now the **last** thing
+standing between a change and `develop`, because nothing proves cluster
+behaviour beforehand. A reviewer should read reconciler changes with that in
+mind and say plainly when a change is one whose blast radius warrants running
+`make test-integration` by hand before merging.
 
 The reviewing agent MUST:
 
@@ -460,12 +225,81 @@ is re-reviewed. A finding is not resolved by arguing it away in a comment; eithe
 change the code or explain in the merge request why the finding does not apply,
 and let the reviewer decide.
 
-### Gate 5 — Merge, tag, release
+### Gate 4 — Merge, tag, publish
 
 Only an approved merge request may be merged. The merge is what authorises the
 version: merging into `develop` cuts the next MINOR, merging into `main` cuts the
 next MAJOR, and CI does the tagging (see [Versioning](#versioning-majorminor)).
 Nothing is tagged or released that did not pass an independent review.
+
+### Gate 5 — Automatic post-merge validation
+
+Everything that needs a real cluster lives here, and **none of it is run by
+hand.** Merging into `develop` triggers, in order:
+
+1. **The integration suite**, against an ephemeral cluster the CI runner creates
+   and destroys. `version` depends on this job, so a failure means no tag and no
+   image.
+2. **`version` and `publish`** — the commit is tagged and the image pushed.
+3. **`verify-picard`** — on the self-hosted runner, the *published* image is
+   upgraded onto `picard` and proven to work.
+
+Validating the published tag rather than a locally built image is deliberate:
+what gets proven is the exact artifact a user would install. The cost is that a
+bad version is published before it is validated, which is acceptable because the
+tag is immutable and cheap, and the alternative proves something other than what
+shipped.
+
+**The operator is never uninstalled.** `picard` tracks `develop`: each merge
+upgrades the release in place, which is also the path real users take and
+catches migration failures a clean install hides. Only the *test environment* is
+temporary — it is created, asserted against, and deleted.
+
+What `verify-picard` asserts, with a timeout:
+
+- the namespace is created
+- a Deployment and Service exist for **every** service in the spec (two)
+- the `<env>-config` ConfigMap exists and carries the spec's `config` values
+- the PVC binds
+- `status.phase` reaches `Ready` with `readyServices == totalServices`
+- `Available` is true and `Degraded` is false
+- deleting the resource reclaims the namespace and releases the finalizer
+
+On failure it captures `helm history`, `helm status`, operator logs selected
+**by label** (`logs deploy/...` picks a pod arbitrarily and usually prints the
+old healthy one), pod descriptions, and events scoped to both namespaces — all
+before the test environment is torn down, because the namespace, its pods and
+its events do not survive teardown.
+
+It deliberately does **not** pass `--rollback-on-failure` (or Helm 3's
+`--atomic`). Rolling back is right for a deploy and wrong for a validation: it
+reverts the failure before diagnostics can be taken, and afterwards `helm status`
+reports `deployed`, actively hiding what it just recovered from. A failed upgrade
+therefore leaves `picard` on the broken revision on purpose. `helm rollback` by
+hand is the escape hatch.
+
+**This runs on `develop` only.** A promotion of `develop` into `main` contains
+nothing that did not already pass it, and wiring a disposable dev cluster into
+the release path would make releases fail for reasons unrelated to the release.
+
+**It does not run after *every* merge, despite the name.** `verify-picard`
+depends on `version` and `publish`, so it is skipped whenever either is skipped
+or fails — including the documented case where three merges land in quick
+succession and the middle run is cancelled by the `version-assign` concurrency
+group. That commit gets no version, no image and no validation, silently. Space
+merges out, or re-run the cancelled workflow.
+
+**`picard` is a shared test cluster, and this job is serialised.** Two runs would
+fight over the same release and delete each other's test environment. It also
+means `picard` is not a cluster to keep anything you care about on: whatever is
+on `develop` is what is running.
+
+**A hotfix merged straight to `main` is never validated on a cluster.** That is
+the one real hole in this arrangement, and it is not an oversight to work around
+quietly — a hotfix reaches `main` without passing through `develop`, so no
+automated job ever exercises it in a cluster. Run `make test-integration` by hand
+against a cluster of your own before merging one, and say in the merge request
+that you did.
 
 ### What never to do
 
@@ -473,13 +307,14 @@ This is the complete list.
 
 - **Never commit directly to `develop` or `main`,** including fast-forward merges.
 - **Never open a merge request before the Definition of Done is met.**
-- **Never merge a change that has not been verified on a live cluster,** except
-  under the two exemptions in [Which merges are exempt](#which-merges-are-exempt).
-- **Never let a failed verification wipe the cluster before its logs and events
-  have been posted to the merge request.**
-- **Never leave `picard` dirty** — the gate cleans up on success and on failure.
-- **Never point the verification gate at a cluster holding environments anyone
-  cares about.** It deletes the CRD, and every `DevEnvironment` with it.
+- **Never make a cluster part of a pull request's checks,** and never deploy a
+  feature branch to a shared cluster. Running `make test-integration` by hand
+  against a throwaway cluster of your own is fine and sometimes required — see
+  [Nothing before the merge touches a cluster](#nothing-before-the-merge-touches-a-cluster).
+  What is forbidden is a CI job that needs a cluster before the merge, and
+  pointing a feature branch at `picard` or anything anyone else uses.
+- **Never keep anything you care about on `picard`.** It tracks `develop`
+  automatically and its test environments are deleted on every run.
 - **Never review your own change.** If you wrote it, a different agent reviews it.
 - **Never merge an unreviewed or change-requested merge request.**
 - **Never create a `v*` tag by hand.** CI derives the next version from the
@@ -489,7 +324,6 @@ This is the complete list.
 - **Never tag or release a commit that did not come through an approved merge
   request.**
 
----
 
 ## Versioning: MAJOR.MINOR
 
@@ -540,9 +374,9 @@ something other than what you meant.
 is a convenience for "give me the newest thing", and it deliberately follows
 development builds as well as promotions — it is not a stability channel.
 
-The `sha-<short>` tag that [Gate 3](#gate-3--live-verification-on-the-picard-cluster)
-builds is a purely local identifier for an image that is side-loaded into a
-cluster and never pushed. It does not contradict the above.
+Nothing builds a `sha-` tag any more, locally or otherwise: [Gate 5](#gate-5--automatic-post-merge-validation)
+deploys the published `MAJOR.MINOR` tag, and no other stage puts an image on a
+cluster.
 
 ### Two consequences worth knowing
 
@@ -631,7 +465,7 @@ The operator watches `DevEnvironment` custom resources and manages:
 `make run` runs the operator on your host against the current context, which is
 the fastest edit-test cycle. Be aware of what it hides: it uses *your* kubeconfig
 credentials, so missing RBAC in the chart's ClusterRole does not show up until
-[Gate 3](#gate-3--live-verification-on-the-picard-cluster) runs the real pod.
+[Gate 5](#gate-5--automatic-post-merge-validation) runs the real pod after the merge.
 
 ```bash
 kubectl config current-context   # always confirm the target first
@@ -690,6 +524,10 @@ same suite validates a local K3D cluster, a CI cluster, or a staging EKS cluster
 Use these for the things only a real cluster does: pods actually becoming Ready,
 PVCs binding, namespace teardown completing.
 
+**In CI this layer runs only after a merge**, never on a pull request — see
+[Nothing before the merge touches a cluster](#nothing-before-the-merge-touches-a-cluster).
+Locally it is yours to run whenever it would help.
+
 Guard them with a build tag so `go test ./...` never reaches for a cluster:
 
 ```go
@@ -698,8 +536,11 @@ Guard them with a build tag so `go test ./...` never reaches for a cluster:
 
 ### End-to-end (GitHub Actions)
 
-CI runs the integration suite against an ephemeral cluster it creates itself, on
-every merge request. See [Phase 5](#phase-5-github-actions-cicd-pipeline).
+After a merge into `develop`, CI runs the integration suite against an ephemeral
+cluster it creates itself, and then upgrades the published image onto `picard`
+and proves it provisions a real environment. See
+[Gate 5](#gate-5--automatic-post-merge-validation) and
+[Phase 5](#phase-5-github-actions-cicd-pipeline).
 
 ---
 
@@ -714,7 +555,7 @@ will not be kept in sync line by line.
 | Target | Purpose |
 | --- | --- |
 | `test` | Unit + envtest. Regenerates manifests first, then runs with `KUBEBUILDER_ASSETS` set |
-| `test-integration` | Integration suite against the current context. Depends on `install`, so it leaves a kustomize-applied CRD behind — which is why [Gate 3](#gate-3--live-verification-on-the-picard-cluster) starts with `make uninstall` |
+| `test-integration` | Integration suite against the current context. Not a gate — see [Nothing before the merge touches a cluster](#nothing-before-the-merge-touches-a-cluster). Depends on `install`, so it leaves a kustomize-applied CRD behind; run `make uninstall` before pointing Helm at the same cluster |
 | `lint`, `lint-fix`, `lint-config` | golangci-lint |
 | `manifests`, `generate`, `helm-crds` | Code generation. Together these must leave no diff (Gate 2) |
 | `helm-lint` | Lint and render the chart |
@@ -736,10 +577,11 @@ provider with `LOCAL_PROVIDER=k3d|kind|minikube` and a name with `LOCAL_CLUSTER`
 ### Image coordinates
 
 `REGISTRY`, `IMAGE_NAME` and `IMAGE_TAG` compose `IMG`. Override `IMAGE_TAG` to
-build something other than the default — Gate 3 relies on this:
+build and side-load something other than the default into a local cluster of
+your own:
 
 ```bash
-make cluster-load LOCAL_CLUSTER=picard IMAGE_TAG="sha-$(git rev-parse --short HEAD)"
+make cluster-load LOCAL_CLUSTER=my-dev IMAGE_TAG="$(git rev-parse --short HEAD)"
 ```
 
 ---
@@ -764,8 +606,9 @@ account password. On why the username is not alongside it, see
 
 One workflow owns the whole line. It validates every merge request, and on
 `develop` and `main` it additionally assigns the next version, tags the commit,
-and publishes. Jobs: `lint`, `generated`, `test`, `image`, `integration`, then
-`version` → `publish` → `release`.
+and publishes. Jobs: `lint`, `generated`, `test` and `image` on everything;
+then, on a push only, `integration` → `version` → `publish`, followed by
+`verify-picard` on `develop` and `release` on `main`.
 
 ### Decisions that look wrong until you know why
 
@@ -778,6 +621,32 @@ of `version` in the same run.
 
 **There is no `release.yml` triggered by `push: tags: v*`,** for the reason given
 under [Versioning](#two-consequences-worth-knowing).
+
+**The `integration` job is `push`-only, and `verify-picard` exists at all.**
+Together these implement
+[Nothing before the merge touches a cluster](#nothing-before-the-merge-touches-a-cluster):
+a pull request runs `lint`, `generated`, `test` and `image`, none of which
+create a cluster or apply a CRD, and every cluster-touching stage moved behind
+the merge. `version` still depends on `integration`, so a failure in
+**`integration`** cuts no version and publishes no image — which is not true of
+a `verify-picard` failure, for the reason given in the next paragraph.
+
+**`verify-picard` runs after `publish`, not before `version`.** It deploys the
+published tag, so what is validated is the exact artifact a user would install
+rather than a locally built lookalike. It is also the only job on a self-hosted
+runner in this workflow, and it is reachable only from a `push` to `develop`.
+**No fork code can ever reach that machine**: a fork's pull request never
+allocates the runner, because the job does not run on `pull_request` at all.
+Do not add a `pull_request` trigger to it.
+
+Be precise about the weaker half, though. `develop` is protected and requires a
+pull request, but `required_approving_review_count` is **0** — GitHub enforces
+that a merge goes through a PR, not that anyone approved it. Someone with write
+access can therefore self-merge and have that commit's steps run automatically
+on a physical Mac with an admin kubeconfig. The independent-agent review in
+[Gate 3](#gate-3--independent-agent-review) is a process rule, not something
+the forge enforces. Raising the count would enforce it, at the cost of blocking
+the agent-driven loop, since a reviewing agent does not post a GitHub approval.
 
 **Only `develop` and `main` are in the `push` trigger.** Feature and hotfix
 branches are covered by the `pull_request` trigger instead. Listing both meant
@@ -819,7 +688,7 @@ which then kept downloading what it was missing.
 
 ## Phase 6: Gitflow — release and hotfix procedures
 
-The day-to-day loop is [The Loop](#the-loop-branch--done--verify--review--merge).
+The day-to-day loop is [The Loop](#the-loop-branch--done--review--merge--validate).
 This section covers only the two procedures that loop does not describe.
 
 ### Promoting develop to main
@@ -868,9 +737,12 @@ git checkout -b hotfix/nil-deref-on-delete main
 ```
 
 Urgency does not waive any gate. A hotfix is the change most likely to be written
-quickly and least likely to have been thought through — including
-[Gate 3](#gate-3--live-verification-on-the-picard-cluster), which it runs in full
-because it never passed through `develop`.
+quickly and least likely to have been thought through.
+
+It is also the one path no automated cluster validation covers: [Gate 5](#gate-5--automatic-post-merge-validation) runs on
+`develop` only, and a hotfix never goes near `develop`. Run
+`make test-integration` by hand against a cluster of your own before merging one,
+and record in the merge request that you did.
 
 Merging it to `main` cuts the next MAJOR, because `main` only ever produces MAJOR
 versions. Afterwards, back-merge `main` into `develop` as above. That is the only
@@ -965,7 +837,7 @@ Delete and recreate it: `make cluster-down && make cluster-up`
 The Helm release names the Deployment after the release, so it is `kado-operator`
 — not `kado-operator-controller-manager`, which is the kustomize
 (`make deploy`) name and does not exist in a chart install. Selecting by label
-works for both and is what Gate 3 uses:
+works for both and is what the validation job uses:
 
 ```bash
 kubectl -n kado-operator-system logs -f --selector app.kubernetes.io/name=kado-operator
@@ -998,18 +870,23 @@ reference: those tags are not published. See
 - Confirm the token has **Read/Write** scope and has not expired
 - Pull requests from forks cannot read secrets — those runs build without pushing, which is expected
 
-### Live verification fails
+### Post-merge validation fails
 
-Read the diagnostics the gate posted to the merge request first — they are
-captured before teardown precisely so they survive it.
+Read the job's diagnostics step first — it captures logs, describes and events
+before the test environment is torn down, precisely so they survive it.
+
+The commit is already on `develop` when this runs. If `integration` failed, no
+version was cut and no image published, so there is nothing to withdraw: fix
+forward through a normal loop, or revert. If `verify-picard` failed, the image
+*was* published and `picard` is left on the broken revision deliberately.
 
 | Symptom | Likely cause |
 | --- | --- |
-| `ImagePullBackOff` on the operator pod | The image was not side-loaded, or `image.pullPolicy` is not `Never`. A feature branch publishes nothing, so the image must be built locally and loaded into the cluster. |
+| `ImagePullBackOff` on the operator pod | `publish` succeeded but pushed a tag the chart does not reference, or Docker Hub is unreachable from `picard`. Check the tag in the job log against <https://hub.docker.com/r/partofaplan/kado-operator/tags>. |
 | Operator runs but the test environment never leaves `Provisioning` | RBAC. `make run` uses your kubeconfig and hides missing permissions; the chart's ClusterRole is what the pod actually gets. Check the logs for `forbidden`. |
-| Helm refuses to install | A CRD left behind by `make install`, or by a previous verification that did not clean up. |
-| Gate cannot run at all | `picard` down or unreachable. This is a failure, not a skip — fix the cluster and re-run. |
-| Two runs interfering | Verification is not serialised. Only one may touch `picard` at a time. |
+| Helm refuses to upgrade, ownership error | A CRD applied by `make install` against `picard` — someone ran `make test-integration` at it. The preflight step names this explicitly. Clearing it means `make uninstall` against the `picard` context, which **deletes the CRD and every `DevEnvironment` on the cluster**. That is acceptable on `picard` and nowhere else; check what is running there first. |
+| Job cannot start | The self-hosted runner is offline, or `picard` is down. Neither is a skip: no validation happened. |
+| `picard` still broken after a fix | Nothing rolls it back on its own. Either merge the fix, which upgrades it, or `helm rollback kado-operator -n kado-operator-system --kube-context picard`. |
 
 ### A merge request cannot clear review
 
