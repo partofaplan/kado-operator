@@ -58,37 +58,43 @@ Versions are `MAJOR.MINOR`. Merging into `develop` increments MINOR; promoting
 `develop` to `main` increments MAJOR and resets MINOR to zero. CI assigns
 every version — never tag by hand.
 
-| Tag | Points at | Published by |
-| --- | --- | --- |
-| `latest` | the newest release | merge to `main` |
-| `1.0` | that release | merge to `main` |
-| `0.1` | one development build | merge to `develop` |
-| `develop` / `main` | the tip of that branch | every merge to it |
-| `sha-<short>` | one exact commit, never moves | every merge |
+Two tags are published, and only two:
 
-Published so far: `develop`, `0.1` and `sha-*`. The `latest`, `main` and
-release-version rows appear with the first promotion of `develop` to `main`.
+| Tag | Points at | Moves |
+| --- | --- | --- |
+| `MAJOR.MINOR` (e.g. `0.4`, `1.0`) | one exact release, forever | never |
+| `latest` | the most recently published version | every merge to `develop` or `main` |
+
+Because versions only ever increase, `latest` is always the newest release on
+either branch — including development builds. It is a convenience for "give me
+the newest thing", not a stability channel: pin `MAJOR.MINOR` or a digest for
+anything reproducible.
+
+Older `sha-<short>` and `develop` tags exist on Docker Hub from before this
+scheme and are frozen — nothing new is pushed to them. Every published commit
+already has a version of its own, so a per-commit tag and a branch tag were a
+second and third name for the same image.
 
 `MAJOR` here means *released*, not *breaking* — it marks the promotion of
 `develop` into `main`. Breaking changes are called out in the release notes,
 because the version number will not signal them.
 
 ```bash
-docker pull partofaplan/kado-operator:develop   # newest development build
-docker pull partofaplan/kado-operator:0.1       # one specific build
-docker pull partofaplan/kado-operator:latest    # newest release (once one exists)
+docker pull partofaplan/kado-operator:latest    # newest published build
+docker pull partofaplan/kado-operator:0.4       # one specific release, pinned
 ```
 
-For anything reproducible — a pinned deployment, a bug report, a rollback —
-use `sha-<short>` or a digest rather than a moving tag. Each CI run prints the
+For anything reproducible — a pinned deployment, a bug report, a rollback — use
+the `MAJOR.MINOR` tag or a digest rather than `latest`. Each CI run prints the
 digest it published in its job summary.
 
 ## Install
 
-> **Before the first release.** `latest`, the published chart and
-> `install.yaml` are all produced by promoting `develop` to `main`, which has
-> not happened yet. Until it does, install from a checkout — the two commands
-> under *from a checkout* below work today.
+> **Before the first release.** The published chart and `install.yaml` are
+> produced by promoting `develop` to `main`, which has not happened yet. Until
+> it does, install from a checkout — the two commands under *from a checkout*
+> below work today. (The `latest` image tag does not require a promotion; it
+> moves on every publish.)
 
 ```bash
 helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \

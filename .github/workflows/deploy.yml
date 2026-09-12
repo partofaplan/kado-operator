@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Image tag to deploy (e.g. develop, 0.2, sha-72a92f7)'
+        description: 'Image tag to deploy: a MAJOR.MINOR version (e.g. 0.4) or latest'
         required: true
-        default: 'develop'
+        default: 'latest'
         type: string
       namespace:
         description: 'Namespace to install the operator into'
@@ -150,6 +150,14 @@ jobs:
           # Roll the release back if it never becomes ready, so a failed deploy
           # leaves the previous version running rather than a broken one.
           #
+          # That promise holds for a PINNED tag. For `latest` it does not:
+          # rollback restores the previous revision's template, which differs
+          # only in the deployedAt annotation below — the image reference is
+          # still `repo:latest`, so the replacement pods re-pull and get the
+          # same broken digest. Rollback restores the template, not the image.
+          # Deploying by digest is the only real fix, and that needs the chart
+          # to stop rendering repo:tag unconditionally.
+          #
           # At revision 1 there is nothing to roll back TO, so Helm uninstalls
           # instead — and because the chart templates the CRD, that removes it
           # and every DevEnvironment with it. Preflight guarantees no foreign
@@ -165,12 +173,39 @@ jobs:
             rollback_flag=--atomic
           fi
 
+          # `latest` moves, so deploying it twice renders a byte-identical pod
+          # spec. Helm writes a new revision, the Deployment's .spec.template
+          # is unchanged, so there is no new pod-template-hash, no new
+          # ReplicaSet and no pod restart: `rollout status` returns instantly
+          # and this job reports success while the OLD image keeps running.
+          # The preflight cannot catch it — it only proves the tag exists, and
+          # `latest` always does.
+          #
+          # Two settings are needed, and each is insufficient alone.
+          # pullPolicy=Always is what makes a *replacement* pod fetch the new
+          # digest instead of reusing the node's cached layer — but kubelet
+          # only reads it when a container starts, and nothing starts here. So
+          # also vary one pod annotation, which changes .spec.template and
+          # forces a genuine rollout. Pinned MAJOR.MINOR tags never move, so
+          # they need neither and keep the cheaper default.
+          pull_policy=IfNotPresent
+          roll=()
+          if [ "$TAG" = "latest" ]; then
+            pull_policy=Always
+            # GITHUB_RUN_ATTEMPT needs runner >= 2.285.0. Self-hosted runners
+            # auto-update, but this workflow has never run on ours, so default
+            # it rather than let `set -u` abort the deploy on an old runner.
+            roll+=( --set-string podAnnotations.deployedAt="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}" )
+          fi
+
           args=(
             upgrade --install "$RELEASE" ./charts/kado-operator
             --kube-context "$CTX"
             --namespace "$NS" --create-namespace
             --set image.repository="$IMAGE"
             --set image.tag="$TAG"
+            --set image.pullPolicy="$pull_policy"
+            "${roll[@]+"${roll[@]}"}"
             "$rollback_flag" --timeout 5m
           )
           if [ "$DRY" = "true" ]; then
