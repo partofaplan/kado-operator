@@ -133,8 +133,12 @@ jobs:
   # The image build used to live in the integration job, where it cost ~99s of
   # that job's ~4.4m and nothing consumed it. It is a Dockerfile smoke test, so
   # it belongs on its own parallel track — with a layer cache, which it never
-  # had there. Both platforms are built because the Dockerfile cross-compiles
-  # per $TARGETARCH, and an amd64-only build would not exercise that.
+  # had there.
+  #
+  # The gha layer cache makes this ~20s when no Go file changed, and does
+  # nothing when one did: the `go build` layer's input is the source, so it
+  # rebuilds by definition. That is inherent, not a cache misconfiguration.
+  # What is tunable is how many platforms get compiled.
   image:
     name: Image builds
     runs-on: ubuntu-latest
@@ -144,12 +148,34 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Pull requests build linux/arm64 only; develop and main build both.
+      #
+      # arm64 is the half worth keeping on a PR: on an amd64 runner it is the
+      # CROSS-compiled target, so it is what exercises $BUILDPLATFORM and
+      # $TARGETARCH. The amd64 half is the native build, and `Unit & envtest`
+      # already compiles this code natively on the same runner — so dropping it
+      # here removes a duplicate, not a check. Both platforms are still built
+      # before anything is published, by this job on develop/main and again by
+      # `publish`.
+      #
+      # Measured cold, two platforms 84s vs one 48s; they share CPU, so one
+      # platform is cheaper but not half.
+      - name: Choose platforms
+        id: platforms
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "list=linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build (no push)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.platforms.outputs.list }}
           cache-from: type=gha,scope=image-check
           cache-to: type=gha,mode=max,scope=image-check
 
