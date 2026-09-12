@@ -600,6 +600,20 @@ jobs:
             sleep 3
           done
           if kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1; then
+            # Capture evidence inline. This step runs LAST, and the
+            # `if: failure()` diagnostics step above was already evaluated —
+            # so when everything else passed and only teardown failed, nothing
+            # else will collect anything. Reclaiming the namespace is one of
+            # this job's own contract assertions, so it does not get to fail
+            # bare.
+            echo "--- devenvironment (expect a lingering finalizer) ---"
+            kubectl --context "$CTX" -n default get devenvironment "$TEST_ENV" -o yaml || true
+            echo "--- namespace ---"
+            kubectl --context "$CTX" get ns "$TEST_ENV" -o yaml || true
+            echo "--- what is left in it ---"
+            kubectl --context "$CTX" -n "$TEST_ENV" get all,pvc -o wide || true
+            echo "--- operator logs ---"
+            kubectl --context "$CTX" -n "$NS" logs --selector app.kubernetes.io/name=kado-operator --tail=200 || true
             echo "::error::namespace $TEST_ENV was not reclaimed; the finalizer did not release"
             exit 1
           fi

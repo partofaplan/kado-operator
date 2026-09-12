@@ -160,11 +160,17 @@ make test-integration
 
 ## picard tracks develop
 
-`picard` is upgraded automatically on every merge into `develop`, by the
+`picard` is upgraded automatically after a merge into `develop`, by the
 `verify-picard` job in `ci.yml`, and the operator is **never uninstalled** —
 each merge upgrades the release in place, which is also the path real users
 take and catches migration failures a clean install hides. Only the test
 `DevEnvironment` is temporary: it is created, asserted against, and deleted.
+
+Not *every* merge, despite the name: `verify-picard` depends on `version` and
+`publish`, so it is skipped whenever either is skipped or cancelled — including
+when three merges land in quick succession and the `version-assign` concurrency
+group cancels the middle run. That commit gets no version, no image and no
+validation.
 
 So `picard` is not a cluster to keep anything on. Whatever is on `develop` is
 what is running, and every validation run deletes its own test environment.

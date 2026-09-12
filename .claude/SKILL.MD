@@ -627,8 +627,9 @@ Together these implement
 [Nothing before the merge touches a cluster](#nothing-before-the-merge-touches-a-cluster):
 a pull request runs `lint`, `generated`, `test` and `image`, none of which
 create a cluster or apply a CRD, and every cluster-touching stage moved behind
-the merge. `version` still depends on `integration`, so a post-merge failure
-cuts no version and publishes no image.
+the merge. `version` still depends on `integration`, so a failure in
+**`integration`** cuts no version and publishes no image — which is not true of
+a `verify-picard` failure, for the reason given in the next paragraph.
 
 **`verify-picard` runs after `publish`, not before `version`.** It deploys the
 published tag, so what is validated is the exact artifact a user would install
