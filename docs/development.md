@@ -44,9 +44,13 @@ other than its author. Five gates, in order, no exceptions:
 
 Two exemptions from gate 3, and only two: a promotion of `develop` into `main`
 (already verified on the way into `develop`, and a release must not depend on a
-disposable dev cluster), and documentation-only changes. A `hotfix/*` branch
-merging into `main` is **not** exempt — it never passes through `develop`, so
-it has never been verified.
+disposable dev cluster), and changes where **every** modified file is a `*.md`
+file. A `hotfix/*` branch merging into `main` is **not** exempt — it never
+passes through `develop`, so it has never been verified.
+
+The documentation exemption is decided mechanically from the diff, not by
+judgement, and the claim is stated in the merge request so the reviewer can
+check it. One non-`.md` file and the gate applies to the whole change.
 
 Nothing is tagged or released that did not come through an approved merge
 request. The full rules live in `.claude/SKILL.MD`, which is authoritative.

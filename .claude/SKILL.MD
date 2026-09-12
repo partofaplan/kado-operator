@@ -284,7 +284,12 @@ and two concurrent runs would delete each other's resources.
 
 #### Which merges are exempt
 
-Exactly one: **`develop` → `main`**.
+Two, and only two: **`develop` → `main`**, and **documentation-only changes**.
+
+Every exemption is decided from the diff, never from intent. State which one
+you are claiming in the merge request, so the reviewer can check it rather than
+take your word for it. Claiming an exemption that does not apply is the same
+process failure as skipping the gate outright.
 
 Everything in that merge request already passed this gate on its way into
 `develop`, because a merge request is the only way in. Re-running it would
@@ -298,14 +303,37 @@ back to `main` without ever passing through `develop`, so it has never been
 verified. It is also, by the nature of hotfixes, the change most likely to have
 been written in a hurry. It runs the full gate.
 
-**Documentation-only changes are exempt.** A change touching only `*.md` files
-— no Go, no chart, no workflow, no Makefile, no `config/` — cannot affect what
-the operator does in a cluster, and requiring a serialized cluster deploy to
-merge a typo fix is how a rule gets routed around. Any other change runs the
-gate.
+**Documentation-only changes are exempt.** A change that touches nothing but
+`*.md` files cannot alter what the operator does in a cluster, and requiring a
+serialized cluster deploy to merge a typo fix is how a rule stops being
+followed.
 
-Promotions to `main` and documentation changes still require CI green and
-independent review. They just do not touch `picard`.
+This is decided mechanically, not by judgement:
+
+```bash
+# Exempt only if EVERY changed file is a .md file.
+# Counted rather than tested with `grep -qv`: some grep builds — ugrep, which
+# is a common `grep` alias on macOS — return the wrong exit status for -q
+# combined with -v, and would silently report every change as exempt.
+changed=$(git diff --name-only origin/develop...HEAD)
+# -i matters: this repo's own rules live in .claude/SKILL.MD, uppercase.
+non_md=$(printf '%s\n' "$changed" | grep -civE '\.md$' || true)
+if [ "${non_md:-0}" -gt 0 ]; then
+  echo "Gate 3 applies — $non_md non-documentation file(s) changed"
+  printf '%s\n' "$changed" | grep -ivE '\.md$' | sed 's/^/  /'
+else
+  echo "Documentation-only — Gate 3 exempt"
+fi
+```
+
+One `.go`, one chart template, one line of `Makefile`, one file under
+`config/` or `.github/`, and the gate applies to the whole merge request. There
+is no "mostly documentation". Note that `.claude/SKILL.MD` is itself a `.md`
+file: changing the rules is exempt, because it changes how people work rather
+than what the operator does.
+
+Both exemptions skip **only** Gate 3. CI must still be green and the merge
+request must still be reviewed by a different agent. Nothing merges unreviewed.
 
 ### Gate 4 — Independent agent review
 
