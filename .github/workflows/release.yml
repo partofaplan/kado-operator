@@ -1,0 +1,314 @@
+name: Release
+
+# Manual only, and only from main.
+#
+# Under the RELEASE.MAJOR.MINOR scheme, merging into develop moves MINOR and
+# merging into main moves MAJOR — both automatic. Cutting a release moves
+# RELEASE, and that is a decision, not a side effect of a merge. So this is the
+# one workflow a human starts.
+#
+# It runs on GitHub-hosted runners only. Nothing here touches a self-hosted
+# runner or a cluster.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and show the release notes without tagging, pushing or publishing'
+        required: true
+        default: true
+        type: boolean
+
+# One release at a time, never cancelled: a half-published release is worse
+# than a queued one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  IMAGE: docker.io/partofaplan/kado-operator
+  # Not a secret: this namespace is public and already appears in IMAGE.
+  DOCKERHUB_USER: partofaplan
+
+jobs:
+  release:
+    name: Cut a release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Refuse to release from anywhere but main
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            echo "::error::releases are cut from main only; got ${{ github.ref_name }}"
+            exit 1
+          fi
+
+      # `gh workflow run -f dry_run=false` sends the STRING "false" over the
+      # REST API, not a boolean — `type: boolean` only makes it a real boolean
+      # when dispatched from the web UI. In GitHub expressions ANY non-empty
+      # string is truthy, so `!inputs.dry_run` evaluates to false for "false":
+      # every publish step would skip and a real release would quietly do
+      # nothing while reporting success.
+      #
+      # Normalised once here, and everything gates on this output. It fails
+      # SAFE: only an explicit false publishes, so an empty, misspelled or
+      # unexpected value is treated as a dry run rather than shipping.
+      - name: Decide whether to publish
+        id: mode
+        # Through env, not interpolated into the script. The fail-safe `case`
+        # below exists precisely because GitHub does not guarantee this value is
+        # a boolean, and a value that can be unexpected can also be hostile —
+        # rendering it into `run:` would put it inside a job holding
+        # contents: write and DOCKERHUB_TOKEN. Dispatch is the one way into this
+        # job that does not pass review, so it gets the careful form.
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          case "$DRY_RUN" in
+            false|False|FALSE) publish=true ;;
+            *)                 publish=false ;;
+          esac
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          echo "dry_run input = '${DRY_RUN}' -> publish=${publish}"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags are the source of truth; we need all of them
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: kado-bin-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Makefile', 'go.mod') }}
+
+      - name: Compute the release version
+        id: ver
+        run: |
+          set -euo pipefail
+          next=$(./hack/next-version.sh release)
+          prev=$(./hack/next-version.sh last-release)
+          # On the FIRST release there is no vR.0.0 to measure from. Leaving
+          # previous_tag_name unset would make GitHub default to the previous
+          # TAG — which is the last merge, since every merge cuts one — and the
+          # release notes would describe a single pull request instead of the
+          # whole history. Fall back to the earliest tag in the repo.
+          if [ -z "$prev" ]; then
+            prev=$(./hack/next-version.sh first-tag)
+            [ -n "$prev" ] && echo "no previous release; measuring notes from the earliest tag ${prev}"
+          fi
+          echo "version=${next}" >> "$GITHUB_OUTPUT"
+          echo "previous=${prev}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release \`v${next}\`"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| notes measured from | \`${prev:-the start of the repository}\` |"
+            echo "| commit | \`${GITHUB_SHA:0:7}\` |"
+            echo "| dry run | \`${{ inputs.dry_run }}\` (publish=${{ steps.mode.outputs.publish }}) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Chart version and appVersion are both the release version. The scheme
+      # is already three-place, so Helm's SemVer2 requirement is satisfied
+      # without inventing a patch component — and appVersion naming a tag that
+      # is actually published is what stops `helm install` from
+      # ImagePullBackOff-ing, since the chart defaults image.tag to it.
+      - name: Package the chart and build the install manifest
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          make helm-crds
+          helm package charts/kado-operator \
+            --version "$V" --app-version "$V" --destination dist/
+          make build-installer IMG="${IMAGE}:${V}"
+          # A stable-named copy alongside the versioned one. A chart filename
+          # carries its version by convention, which makes
+          # releases/latest/download/<name> — the URL that never goes stale —
+          # unspellable for it. install.yaml already has that property for
+          # free, so without this copy the two documented install paths would
+          # disagree: one always current, one pinned to whatever release the
+          # docs happened to be written against.
+          cp "dist/kado-operator-${V}.tgz" dist/kado-operator-chart.tgz
+          cp config/crd/bases/devenv.aviture.dev_devenvironments.yaml dist/crd.yaml
+          cp config/samples/devenv_v1alpha1_devenvironment.yaml dist/devenvironment-sample.yaml
+          ls -la dist/
+
+      # Rendered so a broken chart fails here rather than in a user's cluster,
+      # and so the log shows exactly what the release ships.
+      # --show-only, not a grep across the whole render. Helm sorts the CRD
+      # ahead of the Deployment, and the CRD's own OpenAPI schema contains a
+      # property literally named `image:` — so grepping the full output and
+      # taking the first match picked up the schema line and this gate failed
+      # 100% of the time, on both Helm 3 and 4.
+      - name: Verify both artifacts reference the published image tag
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          rendered=$(helm template kado-operator "dist/kado-operator-${V}.tgz" \
+            --namespace kado-operator-system \
+            --show-only templates/deployment.yaml | grep -E '^[[:space:]]+image: ')
+          echo "chart renders:${rendered}"
+          echo "$rendered" | grep -qF "${IMAGE}:${V}" \
+            || { echo "::error::packaged chart does not reference ${IMAGE}:${V}"; exit 1; }
+
+          # install.yaml is the other artifact users apply, generated separately
+          # by `make build-installer`. It was correct by construction — so was
+          # the chart's CRD copy, until helm-crds drift made that worth checking.
+          grep -qF "${IMAGE}:${V}" dist/install.yaml \
+            || { echo "::error::install.yaml does not reference ${IMAGE}:${V}"; exit 1; }
+          echo "install.yaml references ${IMAGE}:${V}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: steps.mode.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The release version gets its own immutable tag, and `latest` follows it
+      # because a release is by definition the newest published build.
+      - name: Build and publish the release image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ steps.mode.outputs.publish == 'true' }}
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha,scope=publish
+          cache-to: type=gha,mode=max,scope=publish
+
+      # Notes come from the PRs merged since the PREVIOUS RELEASE, not since
+      # the previous tag. Every merge into develop or main cuts a tag, so the
+      # default "since the last tag" would describe one merge rather than the
+      # release.
+      - name: Generate release notes from the PRs merged since the last release
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.ver.outputs.version }}
+          PREV: ${{ steps.ver.outputs.previous }}
+        run: |
+          set -euo pipefail
+          args=(-f tag_name="v${V}" -f target_commitish="${GITHUB_SHA}")
+          if [ -n "$PREV" ]; then
+            args+=(-f previous_tag_name="$PREV")
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            "${args[@]}" --jq .body > /tmp/auto-notes.md
+          echo "--- generated ---"; cat /tmp/auto-notes.md
+
+          DIGEST='${{ steps.build.outputs.digest }}'
+          {
+            echo "## Install"
+            echo
+            echo "Everything below is attached to this release. Pick one path."
+            echo
+            echo "### Helm"
+            echo
+            echo "Helm installs straight from a URL, so the chart attached to"
+            echo "this release needs no registry and no download step:"
+            echo
+            echo '```bash'
+            echo "helm install kado-operator \\"
+            echo "  https://github.com/${GITHUB_REPOSITORY}/releases/download/v${V}/kado-operator-${V}.tgz \\"
+            echo "  --namespace kado-operator-system --create-namespace"
+            echo '```'
+            echo
+            echo "### kubectl (no Helm)"
+            echo
+            echo '```bash'
+            echo "kubectl apply -f https://github.com/${GITHUB_REPOSITORY}/releases/download/v${V}/install.yaml"
+            echo '```'
+            echo
+            echo "### Then create an environment"
+            echo
+            echo '```bash'
+            echo "kubectl apply -f https://github.com/${GITHUB_REPOSITORY}/releases/download/v${V}/devenvironment-sample.yaml"
+            echo "kubectl get devenvironments"
+            echo '```'
+            echo
+            echo "## Container image"
+            echo
+            echo '```'
+            echo "${IMAGE}:${V}"
+            [ -n "$DIGEST" ] && echo "${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Built for \`linux/amd64\` and \`linux/arm64\`. Pin the digest for reproducible deployments; \`${V}\` never moves, \`latest\` does."
+            echo
+            echo "## Attached"
+            echo
+            echo "| File | What it is |"
+            echo "| --- | --- |"
+            echo "| \`install.yaml\` | CRD, RBAC and the operator Deployment in one manifest |"
+            echo "| \`kado-operator-${V}.tgz\` | The Helm chart, version-pinned |"
+            echo "| \`kado-operator-chart.tgz\` | The same chart under a stable name, so \`releases/latest/download/kado-operator-chart.tgz\` always resolves to the newest |"
+            echo "| \`crd.yaml\` | The \`DevEnvironment\` CRD on its own |"
+            echo "| \`devenvironment-sample.yaml\` | A sample environment to apply |"
+            echo
+            echo "---"
+            echo
+            cat /tmp/auto-notes.md
+          } > dist/RELEASE_NOTES.md
+          echo "--- final notes ---"; cat dist/RELEASE_NOTES.md
+
+      - name: Dry run summary
+        if: steps.mode.outputs.publish != 'true'
+        run: |
+          {
+            echo "### Dry run — nothing was tagged, pushed or published"
+            echo
+            echo '```'
+            sed -n '1,80p' dist/RELEASE_NOTES.md
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # LAST, and it creates the tag itself rather than a separate `git push`
+      # step earlier.
+      #
+      # The tag is what next-version.sh counts from, so pushing it before the
+      # chart and the release meant a failure in either left the number burned:
+      # a re-dispatch would compute the NEXT release, and the tag would stand
+      # with nothing behind it. Creating it here, via the releases API at the
+      # same moment the release appears, shrinks that window to a single step.
+      #
+      # What can still be left behind on a failure after this point: the image
+      # and the chart are already on Docker Hub. A re-dispatch recomputes the
+      # same version, since no git tag was made, and republishes both from the
+      # same source — an equivalent rebuild, though at a new digest, because a
+      # multi-arch image and a packaged chart are not byte-reproducible. So the
+      # version tag can move in that one recovery path. That is the deliberate
+      # trade: repeating a push beats burning a release number, and it only
+      # happens when a release has already failed.
+      - name: Create the GitHub release and its tag
+        if: steps.mode.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: v${{ steps.ver.outputs.version }}
+          body_path: dist/RELEASE_NOTES.md
+          files: |
+            dist/install.yaml
+            dist/kado-operator-${{ steps.ver.outputs.version }}.tgz
+            dist/kado-operator-chart.tgz
+            dist/crd.yaml
+            dist/devenvironment-sample.yaml

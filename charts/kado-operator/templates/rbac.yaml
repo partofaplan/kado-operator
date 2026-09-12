@@ -1,0 +1,104 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kado-operator.fullname" . }}-manager
+  labels:
+    {{- include "kado-operator.labels" . | nindent 4 }}
+rules:
+  # The operator provisions whole namespaces and the workloads inside them, so
+  # these permissions are cluster-wide by necessity. Keep them in step with the
+  # +kubebuilder:rbac markers on the reconciler.
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - namespaces
+      - persistentvolumeclaims
+      - secrets
+      - services
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: ["apps"]
+    resources: [deployments]
+    verbs: [create, delete, get, list, patch, update, watch]
+  # Read-only, and no watch: pods are read on demand to explain why a service
+  # is not ready, never written and never cached.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: ["devenv.aviture.dev"]
+    resources: [devenvironments]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: ["devenv.aviture.dev"]
+    resources: [devenvironments/finalizers]
+    verbs: [update]
+  - apiGroups: ["devenv.aviture.dev"]
+    resources: [devenvironments/status]
+    verbs: [get, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kado-operator.fullname" . }}-manager
+  labels:
+    {{- include "kado-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kado-operator.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kado-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.leaderElection.enabled }}
+---
+# Leader election state is a Lease plus events, confined to the release namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kado-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kado-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kado-operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kado-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kado-operator.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kado-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if .Values.metrics.enabled }}
+---
+# Lets the manager delegate metrics authn/authz to the API server.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kado-operator.fullname" . }}-auth-delegator
+  labels:
+    {{- include "kado-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kado-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

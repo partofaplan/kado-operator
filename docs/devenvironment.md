@@ -1,0 +1,212 @@
+# DevEnvironment
+
+`DevEnvironment` is the custom resource kado-operator reconciles. One
+`DevEnvironment` owns one Kubernetes namespace and everything inside it.
+
+- **API group / version:** `devenv.aviture.dev/v1alpha1`
+- **Kind:** `DevEnvironment`
+- **Scope:** Namespaced
+
+The resource lives in a control namespace (for example `default`) and
+provisions a *separate* namespace for the environment itself. Keeping the two
+apart means deleting the environment namespace never takes the record with it,
+and a single control namespace can hold every team's environment.
+
+## Quick example
+
+```yaml
+apiVersion: devenv.aviture.dev/v1alpha1
+kind: DevEnvironment
+metadata:
+  name: team-alpha
+  namespace: default
+spec:
+  owner: team-alpha
+  storage:
+    size: 1Gi
+  config:
+    LOG_LEVEL: debug
+  services:
+    - name: postgres
+      image: postgres:16-alpine
+      port: 5432
+      env:
+        POSTGRES_USER: dev
+        POSTGRES_PASSWORD: dev
+        PGDATA: /var/lib/postgresql/data/pgdata
+      mountPath: /var/lib/postgresql/data
+```
+
+A fuller example lives in
+[`config/samples/devenv_v1alpha1_devenvironment.yaml`](../config/samples/devenv_v1alpha1_devenvironment.yaml).
+
+## What gets created
+
+For a `DevEnvironment` named `team-alpha`:
+
+| Resource | Name | Created when |
+| --- | --- | --- |
+| Namespace | `team-alpha` (or `spec.namespaceName`) | always |
+| ConfigMap | `team-alpha-config` | `spec.config` is non-empty |
+| Secret | one per name in `spec.services[].secretRefs` | a service references it |
+| PersistentVolumeClaim | `team-alpha-workspace` | `spec.storage` is set |
+| Deployment | one per `spec.services[].name` | always |
+| Service | one per `spec.services[].name` (ClusterIP) | always |
+
+Every object carries these labels:
+
+| Label | Meaning |
+| --- | --- |
+| `app.kubernetes.io/managed-by: kado-operator` | created by this operator |
+| `devenv.aviture.dev/environment` | the owning `DevEnvironment` name |
+| `devenv.aviture.dev/owner-namespace` | where that record lives |
+| `devenv.aviture.dev/service` | the service within the environment |
+| `devenv.aviture.dev/owner` | `spec.owner`, for cost attribution |
+
+These labels are load-bearing, not decoration. A namespace cannot hold an
+`ownerReference` back to a namespaced resource, so the operator uses the labels
+both to find the `DevEnvironment` when a child object changes and to decide
+what it is allowed to delete.
+
+## Spec reference
+
+### Top level
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `namespaceName` | string | `metadata.name` | Namespace to provision. **Immutable** — changing it would orphan the environment's data. |
+| `owner` | string | — | Person or team the environment belongs to. Stamped on the namespace as a label. |
+| `storage` | [StorageSpec](#storagespec) | — | Requests a shared volume for the environment. |
+| `services` | [[]ServiceSpec](#servicespec) | — | Supporting services to deploy. Keyed by `name`; duplicates are rejected. |
+| `config` | map[string]string | — | Injected as `<name>-config` and exposed to every service via `envFrom`. |
+
+### StorageSpec
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `size` | Quantity | *required* | Requested capacity, e.g. `1Gi`. |
+| `storageClassName` | string | cluster default | StorageClass backing the claim. |
+| `accessModes` | []string | `[ReadWriteOnce]` | Access modes for the claim. |
+
+The claim is created once and then left alone: PVC specs are largely immutable,
+so resizing is a deliberate manual operation rather than something a spec edit
+silently attempts.
+
+### ServiceSpec
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `name` | string | *required* | DNS label, unique within the environment. Names the Deployment and Service. |
+| `image` | string | *required* | Container image to run. |
+| `port` | int32 | *required* | Container port, exposed through a ClusterIP Service. 1–65535. |
+| `replicas` | int32 | `1` | Desired pod count. |
+| `env` | map[string]string | — | Plain environment variables. Sorted before rendering, so a reconcile never churns the pod template. |
+| `secretRefs` | []string | — | Secrets in the `DevEnvironment`'s **own** namespace, copied into the environment namespace and mounted via `envFrom`. |
+| `mountPath` | string | — | Mounts the shared volume here. Requires `spec.storage`. |
+| `resources` | ResourceRequirements | — | Compute resources for the container. |
+| `readinessProbe` | Probe | — | Gates when the service counts as ready. A standard Kubernetes probe; leave the handler empty (`readinessProbe: {}`) for a TCP check against this service's own `port`. See [Readiness](#readiness). |
+
+Put credentials in `secretRefs`, not `env` — `env` values are stored in the
+`DevEnvironment` spec in plain text and visible to anyone who can read it.
+
+Services reach each other by name inside the namespace:
+`postgres:5432`, `redis:6379`.
+
+## Status
+
+| Field | Description |
+| --- | --- |
+| `phase` | `Pending`, `Provisioning`, `Ready` or `Failed`. A summary for humans; conditions carry the detail. `Provisioning` does not imply healthy — check `Degraded`, which `kubectl get devenvironments` now shows as a column. |
+| `namespace` | The namespace actually provisioned. |
+| `readyServices` / `totalServices` | How many services have at least one ready replica. |
+| `observedGeneration` | The spec generation this status was computed from. |
+| `conditions` | `Available`, `Progressing`, `Degraded`. |
+
+```console
+$ kubectl get devenvironments
+NAME         PHASE   NAMESPACE    READY   SERVICES   AGE
+team-alpha   Ready   team-alpha   2       2          3m
+```
+
+## Lifecycle
+
+**Creation.** The operator adds the `devenv.aviture.dev/finalizer` finalizer,
+then creates the namespace and its contents. If a namespace of that name
+already exists and is *not* labelled as managed by this same
+`DevEnvironment`, reconciliation fails with `Degraded` rather than adopting
+it — this is what stops a typo'd `namespaceName` from taking over `kube-system`.
+
+**Updates.** Editing `spec.services` converges the namespace: entries added are
+created, entries removed have their Deployment and Service deleted. Clearing
+`spec.config` removes the ConfigMap.
+
+**Deletion.** The finalizer deletes the environment namespace and is only
+released once the namespace is gone, so the record remains visible while
+teardown is in flight. A namespace the operator did not create is left
+untouched and the finalizer is released immediately.
+
+## Readiness
+
+Without a probe, `readyServices` counts containers Kubernetes *started*, not
+services that work. A probe-less container is ready the instant it starts, so a
+database still replaying its WAL — or one about to crash — counts as ready.
+
+The shortest useful form is an empty handler, which becomes a TCP check against
+the port the service already declares:
+
+```yaml
+services:
+  - name: postgres
+    image: postgres:16-alpine
+    port: 5432
+    readinessProbe: {}          # TCP connect to 5432
+```
+
+An empty handler is filled in rather than passed through because Kubernetes
+accepts a probe with no action and silently never runs it — `readinessProbe: {}`
+would otherwise look like it was doing something while changing nothing.
+
+Anything a Kubernetes probe supports works, and an explicit handler is used
+verbatim:
+
+```yaml
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 10
+```
+
+Adding or changing a probe rolls the service's Deployment, as any pod-template
+change does. Omitting the field leaves behaviour exactly as it was.
+
+A probe that never passes leaves the environment at `Provisioning` with
+`Degraded=False` indefinitely — the container is running, so nothing is
+*blocked*, it is simply not answering. That is reported honestly rather than as
+a failure, but it does mean a probe aimed at the wrong port looks like a slow
+start forever. `kubectl describe pod -n <env>` names the failing probe.
+
+## Troubleshooting
+
+Check conditions first — `phase` alone will not say why:
+
+```bash
+kubectl describe devenvironment team-alpha
+```
+
+> **A service with no `readinessProbe` may briefly read as `Ready` before
+> dying.** Kubernetes calls a running probe-less container ready the moment it
+> starts, so a container that crashes a few seconds in alternates between ready
+> and degraded until it settles into a backoff. Set a
+> [readinessProbe](#readiness) to make `Ready` mean the service is actually
+> answering.
+
+| Symptom | Likely cause |
+| --- | --- |
+| `Degraded=True`, "not managed by this DevEnvironment" | The target namespace already exists and belongs to something else. Pick a different `namespaceName`. |
+| `Degraded=True`, "reading source secret" | A name in `secretRefs` does not exist in the `DevEnvironment`'s own namespace. |
+| `Degraded=True`, reason `WorkloadUnhealthy` | A container cannot start. The message names the service, the blocking reason (`CrashLoopBackOff`, `ImagePullBackOff`, `Unschedulable`, …), the last exit code and the `kubectl logs` command that shows why. A missing required env var — `POSTGRES_PASSWORD`, say — lands here. |
+| Stuck at `Provisioning` with `Degraded=False` | Pods are running but not ready. Nothing is *blocked*, so this is not degraded: check image pull times, whether a PVC is waiting for a consumer (a volume no service mounts stays `Pending` forever), and whether a `readinessProbe` is pointed at a port nothing serves. A probe that never passes will sit here indefinitely — `kubectl describe pod -n <env>` shows the failing probe. |
+| Stuck deleting | The namespace is still terminating, usually a finalizer on something inside it. `kubectl get ns <env> -o yaml`. |
+| `helm install` rejects the CRD as not Helm-owned | The CRD was installed by `make install` (kustomize). See [CRD ownership](development.md#crd-ownership-make-install-vs-the-chart). |

@@ -1,0 +1,645 @@
+name: CI
+
+on:
+  # Only the branches that publish. Feature and hotfix branches are covered by
+  # the pull_request trigger below, which tests the merge result rather than the
+  # branch tip. Listing them here as well ran the entire pipeline twice for
+  # every commit on an open PR, in two concurrency groups that could not cancel
+  # each other.
+  push:
+    branches: [ develop, main ]
+  pull_request:
+    branches: [ develop, main ]
+
+# Never cancel a develop/main run: those assign a version and publish, and a
+# half-finished publish is worse than a slow queue. Pull request runs are
+# cancellable, which matters because each one spins up a cluster for the
+# integration job.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !contains(fromJSON('["develop","main"]'), github.ref_name) }}
+
+env:
+  IMAGE: docker.io/partofaplan/kado-operator
+  # Not a secret: this namespace is public and already appears in IMAGE.
+  DOCKERHUB_USER: partofaplan
+
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.3.0
+          args: --timeout=5m
+
+      # Cheap, and it guards the arithmetic that decides what gets tagged and
+      # published. Lives here rather than in its own job because it takes a
+      # second and this job is already the shortest on the critical path.
+      - name: Test the version scripts
+        run: make test-scripts
+
+  generated:
+    name: Generated code is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # controller-gen, kustomize and the envtest control-plane binaries are
+      # `go install`ed into bin/, which setup-go's module cache does not cover.
+      # Without this they were re-downloaded on every job of every run.
+      #
+      # The key is per-job on purpose. Each job populates bin/ with a different
+      # subset — `generated` installs only controller-gen, `test` adds
+      # setup-envtest and the control-plane binaries, `integration` adds
+      # kustomize — and actions/cache does not save on a hit. With one shared
+      # key the first job to miss froze its partial bin/ for everyone, and the
+      # jobs needing more kept downloading it on every run.
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: kado-bin-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Makefile', 'go.mod') }}
+
+      # A stale zz_generated.deepcopy.go or CRD manifest means the cluster gets
+      # a schema that does not match the Go types, so fail loudly here rather
+      # than at apply time.
+      # helm-crds is included deliberately: without it the chart's copy of the
+      # CRD can drift from config/crd/bases, CI stays green, and the release
+      # job regenerates it at package time — shipping a CRD nobody reviewed.
+      - name: Regenerate manifests, deepcopy and chart CRDs
+        run: make manifests generate helm-crds
+
+      - name: Fail if regeneration changed anything
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "::error::Generated files are out of date. Run 'make manifests generate helm-crds' and commit the result."
+            git --no-pager diff
+            exit 1
+          fi
+
+  test:
+    name: Unit & envtest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # controller-gen, kustomize and the envtest control-plane binaries are
+      # `go install`ed into bin/, which setup-go's module cache does not cover.
+      # Without this they were re-downloaded on every job of every run.
+      #
+      # The key is per-job on purpose. Each job populates bin/ with a different
+      # subset — `generated` installs only controller-gen, `test` adds
+      # setup-envtest and the control-plane binaries, `integration` adds
+      # kustomize — and actions/cache does not save on a hit. With one shared
+      # key the first job to miss froze its partial bin/ for everyone, and the
+      # jobs needing more kept downloading it on every run.
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: kado-bin-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Makefile', 'go.mod') }}
+
+      # test-only rather than test: both provision the envtest control-plane
+      # binaries and set KUBEBUILDER_ASSETS (a bare 'go test ./...' would fail
+      # without them), but test-only skips the codegen prerequisites that the
+      # `generated` job is already regenerating and diffing in parallel.
+      - name: Run tests
+        run: make test-only
+
+      - name: Report coverage
+        run: go tool cover -func=cover.out | tail -1
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cover.out
+
+  # The image build used to live in the integration job, where it cost ~99s of
+  # that job's ~4.4m and nothing consumed it. It is a Dockerfile smoke test, so
+  # it belongs on its own parallel track — with a layer cache, which it never
+  # had there.
+  #
+  # The gha layer cache makes this ~20s when no Go file changed. When one did,
+  # the `go mod download` layer above still hits — it is keyed on go.mod and
+  # go.sum — but `go build` and everything below it rebuild, because their
+  # input is the source. That is inherent, not a cache misconfiguration. What
+  # is tunable is how many platforms get compiled.
+  image:
+    name: Image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Pull requests build linux/arm64 only; develop and main build both.
+      #
+      # arm64 is the half worth keeping on a PR: on an amd64 runner it is the
+      # CROSS-compiled target, so it is what exercises $BUILDPLATFORM and
+      # $TARGETARCH. The amd64 half is the native build, and `Unit & envtest`
+      # already compiles this code natively on the same runner — so dropping it
+      # here removes a duplicate, not a check. Both platforms are still built
+      # before anything is published, by this job on develop/main and again by
+      # `publish`.
+      #
+      # Measured cold, two platforms 84s vs one 48s; they share CPU, so one
+      # platform is cheaper but not half.
+      - name: Choose platforms
+        id: platforms
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "list=linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: ${{ steps.platforms.outputs.list }}
+          cache-from: type=gha,scope=image-check
+          cache-to: type=gha,mode=max,scope=image-check
+
+  # Folded in from the old integration-test.yml so that `version` can depend on
+  # it. A separate workflow cannot be a `needs` dependency, which meant a
+  # release could be tagged and published while integration tests were red —
+  # contradicting the Definition of Done that requires them.
+  integration:
+    name: Integration
+    # Push only. A feature branch must not create a cluster or apply a CRD
+    # anywhere — not even to the throwaway k3d cluster this job builds inside
+    # the runner. Everything a pull request runs (lint, codegen, unit+envtest,
+    # the Dockerfile build) is cluster-free; envtest is a local API server and
+    # etcd binary, not a cluster. The trade is deliberate: a broken reconciler
+    # now reaches develop before anything catches it, so `version` is gated on
+    # this job and no version is cut until it passes.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # controller-gen, kustomize and the envtest control-plane binaries are
+      # `go install`ed into bin/, which setup-go's module cache does not cover.
+      # Without this they were re-downloaded on every job of every run.
+      #
+      # The key is per-job on purpose. Each job populates bin/ with a different
+      # subset — `generated` installs only controller-gen, `test` adds
+      # setup-envtest and the control-plane binaries, `integration` adds
+      # kustomize — and actions/cache does not save on a hit. With one shared
+      # key the first job to miss froze its partial bin/ for everyone, and the
+      # jobs needing more kept downloading it on every run.
+      - name: Cache tool binaries
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: kado-bin-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Makefile', 'go.mod') }}
+
+      # --- Cluster provisioning: the ONLY provider-specific step. ---
+      # Swap this for Kind, minikube, or a kubeconfig secret pointing at a
+      # remote cluster. Every step below acts on the current kubectl context
+      # and is unaffected by the choice.
+      - name: Create ephemeral cluster
+        run: |
+          curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.7.4 bash
+          k3d cluster create ci --kubeconfig-update-default --wait
+      # --- End provider-specific section. ---
+
+      - name: Show target cluster
+        run: |
+          kubectl config current-context
+          kubectl get nodes
+
+      - name: Run integration tests
+        run: make test-integration-only
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get devenvironments -A -o wide || true
+          kubectl describe devenvironments -A || true
+          kubectl get ns
+          kubectl get all -A -l app.kubernetes.io/managed-by=kado-operator || true
+
+  # Assigns MAJOR.MINOR from the highest existing tag. Only develop and main
+  # produce versions; feature branches are validated but never versioned.
+  version:
+    name: Assign version
+    needs: [ lint, test, generated, image, integration ]
+    if: github.event_name == 'push' && contains(fromJSON('["develop","main"]'), github.ref_name)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Serialised and never cancelled: two runs computing "the next version"
+    # concurrently would race to push the same tag.
+    #
+    # Caveat: GitHub keeps only ONE run pending per concurrency group, so with
+    # three merges in quick succession the middle run is cancelled and that
+    # commit gets no version and no image. Space merges out, or re-run the
+    # cancelled one.
+    concurrency:
+      group: version-assign
+      cancel-in-progress: false
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags are the source of truth; we need all of them
+
+      # RELEASE.MAJOR.MINOR. develop moves MINOR, main moves MAJOR, and only a
+      # release package moves RELEASE — which is why this job never computes a
+      # release version. That lives in release.yml, triggered deliberately.
+      #
+      # The arithmetic is in hack/next-version.sh rather than inline because
+      # release.yml needs the same rules, and two copies would eventually
+      # disagree about what "next" means. It has its own tests.
+      - name: Compute next version
+        id: next
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$BRANCH" in
+            develop) kind=minor ;;
+            main)    kind=major ;;
+            *)       echo "::error::refusing to version branch $BRANCH"; exit 1 ;;
+          esac
+          next=$(./hack/next-version.sh "$kind")
+          echo "version=${next}" >> "$GITHUB_OUTPUT"
+          echo "\`$BRANCH\` (${kind}) → \`v${next}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # The tag is pushed before the image is built. If `publish` then fails,
+      # the tag exists with no image behind it: use "Re-run failed jobs" to
+      # recover, since a full re-run aborts on "tag already exists".
+      - name: Tag the commit
+        run: |
+          set -euo pipefail
+          V="v${{ steps.next.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$V" -m "$V from ${{ github.ref_name }}"
+          git push origin "$V"
+
+  publish:
+    name: Build & publish image
+    needs: [ version ]
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Belt and braces. The Dockerfile pins its builder stage to $BUILDPLATFORM
+      # and the runtime stage only COPYs a binary, so no foreign-arch
+      # instruction ever executes — the `image` job builds both platforms
+      # without QEMU on develop and main, which is the only event this job runs
+      # on. Kept here because this job pushes release artifacts and the cost is
+      # a few seconds.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Two tags, and only two: the immutable MAJOR.MINOR version, and `latest`
+      # tracking whatever was published most recently. Per-commit (sha-) and
+      # floating branch tags were dropped — every published commit already has a
+      # version of its own, so those were a second and third name for one image.
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=kado-operator
+            org.opencontainers.image.description=Operator for provisioning dev environments in Kubernetes
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # image-check first: the `image` job built these exact layers minutes
+          # earlier in this same run, while scope=publish was last written by
+          # the previous release against different source.
+          cache-from: |
+            type=gha,scope=image-check
+            type=gha,scope=publish
+          cache-to: type=gha,mode=max,scope=publish
+
+      - name: Summarise published image
+        run: |
+          {
+            echo "### Published \`v${{ needs.version.outputs.version }}\`"
+            echo
+            echo "Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Post-merge validation on the live picard cluster. The ONLY thing in this
+  # pipeline that touches a real, persistent cluster.
+  #
+  # develop only. A promotion to main contains nothing that did not already
+  # pass this job on its way into develop, and wiring a dev cluster into the
+  # release path would make releases fail for reasons unrelated to the release.
+  #
+  # It runs AFTER publish and deploys the published tag, so what gets validated
+  # is the exact artifact users would install — not a locally built lookalike.
+  # That does mean a bad version is published before it is validated; the tag
+  # is immutable and cheap, and the alternative is building on the Mac and
+  # validating something other than what shipped.
+  verify-picard:
+    name: Validate on picard
+    needs: [ version, publish ]
+    if: github.ref_name == 'develop'
+    runs-on: [ self-hosted, macOS, ARM64 ]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    # picard is a single shared cluster: two of these would fight over the same
+    # operator release and delete each other's test environment.
+    concurrency:
+      group: picard-validate
+      cancel-in-progress: false
+    env:
+      CTX: picard
+      NS: kado-operator-system
+      RELEASE: kado-operator
+      V: ${{ needs.version.outputs.version }}
+    steps:
+      # A self-hosted runner reuses its workspace, so the default would leave
+      # GITHUB_TOKEN in .git/config on a physical machine. Nothing here needs
+      # git auth.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # A self-hosted runner does not get a login shell's PATH. kubectl and
+      # helm live in ~/.rd/bin (Rancher Desktop) on this machine.
+      - name: Put cluster tooling on PATH
+        run: |
+          set -euo pipefail
+          for d in "$HOME/.rd/bin" /opt/homebrew/bin /usr/local/bin; do
+            [ -d "$d" ] || continue
+            echo "$d" >> "$GITHUB_PATH"
+          done
+
+      - name: Preflight
+        run: |
+          set -euo pipefail
+          for t in kubectl helm; do
+            command -v "$t" >/dev/null || { echo "::error::$t not found on PATH: $PATH"; exit 1; }
+          done
+
+          # This machine also has a rancher-desktop context. Every command
+          # below pins --kube-context; this confirms the target exists first so
+          # the failure is one clear line rather than a five-minute timeout.
+          if ! kubectl config get-contexts "$CTX" >/dev/null 2>&1; then
+            echo "::error::kube context '$CTX' not found. Available:"
+            kubectl config get-contexts -o name | sed 's/^/  /'
+            exit 1
+          fi
+          kubectl --context "$CTX" get nodes -o wide
+
+          # The chart installs the CRD. A CRD applied by kustomize (make
+          # install) carries no managed-by label at all, so testing for a
+          # *different* manager misses the common case — treat anything not
+          # Helm-owned by this release in this namespace as a conflict.
+          CRD=devenvironments.devenv.aviture.dev
+          if kubectl --context "$CTX" get crd "$CRD" >/dev/null 2>&1; then
+            owner=$(kubectl --context "$CTX" get crd "$CRD" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+            rel=$(kubectl --context "$CTX" get crd "$CRD" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || true)
+            rns=$(kubectl --context "$CTX" get crd "$CRD" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}' 2>/dev/null || true)
+            if [ "$owner" != "Helm" ] || [ "$rel" != "$RELEASE" ] || [ "$rns" != "$NS" ]; then
+              echo "::error::CRD $CRD exists but is not owned by Helm release $RELEASE/$NS (managed-by='$owner' release='$rel' ns='$rns'). Helm cannot adopt it. Remove it with 'make uninstall' against context $CTX."
+              exit 1
+            fi
+          fi
+
+      # Upgrade in place. The operator is NOT uninstalled afterwards — picard
+      # tracks develop, and every merge moves it forward.
+      #
+      # No --rollback-on-failure (or Helm 3 --atomic) on purpose: this is a
+      # validation, and a rollback reverts the failure before any diagnostics
+      # can be taken. After one, the failing pod is gone and `helm status`
+      # reports `deployed`, hiding what it just recovered from. A failed
+      # upgrade therefore leaves picard on the broken revision deliberately,
+      # with the diagnostics step below capturing why. `helm rollback` by hand
+      # is the escape hatch.
+      - name: Upgrade the operator
+        run: |
+          set -euo pipefail
+          helm upgrade --install "$RELEASE" ./charts/kado-operator \
+            --kube-context "$CTX" \
+            --namespace "$NS" --create-namespace \
+            --set image.tag="$V" \
+            --wait --timeout 5m
+          # `| head` under `set -o pipefail` fails the step if helm ever
+          # outgrows the pipe buffer and dies on SIGPIPE.
+          helm --kube-context "$CTX" -n "$NS" status "$RELEASE" | head -5 || true
+
+      - name: Validate a dev environment end to end
+        run: |
+          set -euo pipefail
+          # Not named ENV: bash in POSIX mode and every `sh` read $ENV as a
+          # file to source at startup, and this goes into GITHUB_ENV for the
+          # later steps.
+          TEST_ENV="validate-${GITHUB_SHA::7}"
+          echo "TEST_ENV=$TEST_ENV" >> "$GITHUB_ENV"
+          fail(){ echo "::error::$*"; exit 1; }
+
+          # Block style, not flow style. `{ image: redis:7-alpine }` is an
+          # ambiguous plain scalar in YAML flow context — kubectl's parser
+          # accepts it, stricter ones reject it outright. Quoting the tags and
+          # dropping the braces removes the question.
+          #
+          # A dedicated resource, not config/samples/, whose fixed name
+          # team-alpha would collide with anything already on the cluster.
+          cat <<YAML | kubectl --context "$CTX" apply -f -
+          apiVersion: devenv.aviture.dev/v1alpha1
+          kind: DevEnvironment
+          metadata:
+            name: $TEST_ENV
+            namespace: default
+          spec:
+            owner: ci-validation
+            config:
+              LOG_LEVEL: debug
+            storage:
+              size: 128Mi
+            services:
+              # mountPath is required, not decoration: picard's default
+              # StorageClass is local-path with WaitForFirstConsumer, so a PVC
+              # nothing mounts stays Pending forever while the environment
+              # still reports Ready.
+              - name: redis
+                image: "redis:7-alpine"
+                port: 6379
+                mountPath: /data
+              # A second service so "a Deployment and Service for EVERY
+              # service" is an assertion rather than a tautology at n=1.
+              - name: postgres
+                image: "postgres:16-alpine"
+                port: 5432
+                env:
+                  POSTGRES_PASSWORD: verify
+                  PGDATA: /var/lib/postgresql/data/pgdata
+          YAML
+
+          for i in $(seq 1 60); do
+            PH=$(kubectl --context "$CTX" -n default get devenvironment "$TEST_ENV" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            [ "$PH" = "Ready" ] && break
+            sleep 5
+          done
+          [ "${PH:-}" = "Ready" ] || fail "phase=${PH:-<none>} after 300s"
+          echo "phase Ready in ~$((i*5))s"
+
+          D=$(kubectl --context "$CTX" -n "$TEST_ENV" get deploy --no-headers | wc -l | tr -d ' ')
+          S=$(kubectl --context "$CTX" -n "$TEST_ENV" get svc --no-headers | wc -l | tr -d ' ')
+          [ "$D" = "2" ] && [ "$S" = "2" ] || fail "deployments=$D services=$S, want 2/2"
+
+          CM=$(kubectl --context "$CTX" -n "$TEST_ENV" get cm "$TEST_ENV-config" -o jsonpath='{.data.LOG_LEVEL}')
+          [ "$CM" = "debug" ] || fail "configmap LOG_LEVEL=$CM, want debug"
+
+          PV=$(kubectl --context "$CTX" -n "$TEST_ENV" get pvc -o jsonpath='{.items[0].status.phase}')
+          [ "$PV" = "Bound" ] || fail "pvc=$PV, want Bound"
+
+          # Capture first, then read from a here-string. `read` returns 1 at EOF
+          # without a trailing delimiter, and kubectl's jsonpath output has no
+          # trailing newline — so `read < <(kubectl ...)` exits non-zero even
+          # though it assigned every variable, and under `set -e` that kills the
+          # step silently, skipping the assertions below. `<<<` appends the
+          # newline; a genuine kubectl failure still trips `set -e` on the
+          # assignment.
+          conds=$(kubectl --context "$CTX" -n default get devenvironment "$TEST_ENV" -o jsonpath='{.status.readyServices} {.status.totalServices} {.status.conditions[?(@.type=="Available")].status} {.status.conditions[?(@.type=="Degraded")].status}')
+          read -r R T AV DG <<< "$conds"
+          [ "$R" = "$T" ] || fail "ready=$R total=$T"
+          [ "$AV" = "True" ] || fail "Available=$AV"
+          [ "$DG" = "False" ] || fail "Degraded=$DG"
+
+          {
+            echo "### picard validation — \`$V\`"
+            echo
+            echo "| check | result |"
+            echo "| --- | --- |"
+            echo "| phase | Ready in ~$((i*5))s |"
+            echo "| deployments / services | $D / $S |"
+            echo "| ConfigMap LOG_LEVEL | $CM |"
+            echo "| PVC | $PV |"
+            echo "| ready / total | $R / $T |"
+            echo "| Available / Degraded | $AV / $DG |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Declared BEFORE teardown on purpose. Steps run in declaration order
+      # regardless of their `if`, so with this below the teardown step the
+      # namespace, its pods and its events were already deleted by the time
+      # `describe` ran — destroying exactly the evidence that explains why the
+      # environment never reached Ready. The operator itself stays installed
+      # either way.
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "--- helm ---"
+          helm --kube-context "$CTX" -n "$NS" history "$RELEASE"
+          helm --kube-context "$CTX" -n "$NS" status "$RELEASE"
+          echo "--- operator (select by label: 'logs deploy/...' picks a pod arbitrarily and usually the OLD healthy one) ---"
+          kubectl --context "$CTX" -n "$NS" logs --selector app.kubernetes.io/name=kado-operator --prefix --tail=200
+          kubectl --context "$CTX" -n "$NS" logs --selector app.kubernetes.io/name=kado-operator --prefix --previous --tail=200
+          kubectl --context "$CTX" -n "$NS" describe pods
+          kubectl --context "$CTX" -n "$NS" get events --sort-by=.lastTimestamp
+          if [ -n "${TEST_ENV:-}" ]; then
+            echo "--- test environment $TEST_ENV ---"
+            kubectl --context "$CTX" -n default describe devenvironment "$TEST_ENV"
+            kubectl --context "$CTX" -n "$TEST_ENV" get deploy,svc,pvc,pods -o wide
+            kubectl --context "$CTX" -n "$TEST_ENV" describe pods
+            kubectl --context "$CTX" -n "$TEST_ENV" get events --sort-by=.lastTimestamp
+          fi
+
+      # Teardown is part of the operator's contract, so proving it is part of
+      # the validation.
+      - name: Prove teardown, and remove the test environment
+        if: always()
+        run: |
+          set -euo pipefail
+          [ -n "${TEST_ENV:-}" ] || { echo "no test environment was created"; exit 0; }
+          # Unguarded, this aborts the step under `set -e` the moment the
+          # delete times out — which is exactly what happens when the
+          # DevEnvironment is stuck on the operator's own finalizer, i.e. when
+          # the reconciler is broken, i.e. when this job fires. The step would
+          # die here with no evidence and no ::error:: annotation. Falling
+          # through instead lets the namespace check below fire the evidence
+          # block and exit 1 properly.
+          kubectl --context "$CTX" -n default delete devenvironment "$TEST_ENV" --ignore-not-found --timeout=180s \
+            || echo "delete did not complete in 180s; collecting evidence below"
+          for i in $(seq 1 40); do
+            kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1 || break
+            sleep 3
+          done
+          if kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1; then
+            # Capture evidence inline. This step runs LAST, and the
+            # `if: failure()` diagnostics step above was already evaluated —
+            # so when everything else passed and only teardown failed, nothing
+            # else will collect anything. Reclaiming the namespace is one of
+            # this job's own contract assertions, so it does not get to fail
+            # bare.
+            echo "--- devenvironment (expect a lingering finalizer) ---"
+            kubectl --context "$CTX" -n default get devenvironment "$TEST_ENV" -o yaml || true
+            echo "--- namespace ---"
+            kubectl --context "$CTX" get ns "$TEST_ENV" -o yaml || true
+            echo "--- what is left in it ---"
+            kubectl --context "$CTX" -n "$TEST_ENV" get all,pvc -o wide || true
+            echo "--- operator logs ---"
+            kubectl --context "$CTX" -n "$NS" logs --selector app.kubernetes.io/name=kado-operator --tail=200 || true
+            echo "::error::namespace $TEST_ENV was not reclaimed; the finalizer did not release"
+            exit 1
+          fi
+          echo "namespace reclaimed, finalizer released"
