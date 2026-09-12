@@ -70,6 +70,63 @@ var _ = Describe("DevEnvironment", func() {
 		}
 	}
 
+	// Server-side defaulting is the whole reason this lives in envtest. The API
+	// server fills in timeoutSeconds, periodSeconds, successThreshold and
+	// failureThreshold on a probe — and path/scheme on an httpGet — none of
+	// which the operator sends. If the operator compared what it built against
+	// what came back, every reconcile would rewrite the Deployment and roll the
+	// pods. The fake client cannot catch that: it applies no defaults and never
+	// maintains Generation, so the equivalent unit test compares 0 to 0.
+	//
+	// resourceVersion is the assertion that actually bites: it changes on any
+	// write, including one that stores identical content.
+	DescribeTable("does not rewrite the Deployment on repeated reconciles",
+		func(probe *corev1.Probe) {
+			name := uniqueName()
+			env := newResource(name)
+			env.Spec.Services[0].ReadinessProbe = probe
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+
+			key := types.NamespacedName{Name: name, Namespace: "default"}
+			Eventually(func() error {
+				_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+				return err
+			}).Should(Succeed())
+
+			deployKey := types.NamespacedName{Name: "redis", Namespace: name}
+			var first appsv1.Deployment
+			Expect(k8sClient.Get(ctx, deployKey, &first)).To(Succeed())
+			rendered := first.Spec.Template.Spec.Containers[0].ReadinessProbe
+			if probe == nil {
+				Expect(rendered).To(BeNil(), "no probe requested, none should be rendered")
+			} else {
+				Expect(rendered).NotTo(BeNil())
+				// Proves the API server really did default fields the operator
+				// never sets — otherwise this spec would be testing nothing.
+				Expect(rendered.PeriodSeconds).To(BeNumerically(">", 0))
+				Expect(rendered.TimeoutSeconds).To(BeNumerically(">", 0))
+			}
+
+			for i := 0; i < 3; i++ {
+				_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var last appsv1.Deployment
+			Expect(k8sClient.Get(ctx, deployKey, &last)).To(Succeed())
+			Expect(last.ResourceVersion).To(Equal(first.ResourceVersion),
+				"a reconcile that changes nothing must not write the Deployment")
+			Expect(last.Generation).To(Equal(first.Generation),
+				"a write to spec would roll the pods")
+		},
+		Entry("empty handler, defaulted to TCP", &corev1.Probe{}),
+		Entry("explicit httpGet, where the API server also defaults path and scheme",
+			&corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{Port: intstrFromInt32(6379)},
+			}}),
+		Entry("no probe at all", nil),
+	)
+
 	It("provisions a namespace, deployment and service", func() {
 		name := uniqueName()
 		env := newResource(name)

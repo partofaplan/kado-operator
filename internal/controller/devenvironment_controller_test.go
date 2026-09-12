@@ -841,9 +841,16 @@ func TestReconcileRendersTheReadinessProbeOntoTheDeployment(t *testing.T) {
 	assert.Equal(t, intstrFromInt32(6379), probe.TCPSocket.Port)
 }
 
-// The pod template must be byte-stable across reconciles, or every pass would
-// roll the Deployment.
-func TestReconcileWithAProbeIsIdempotent(t *testing.T) {
+// Catches the operator producing a different template on the second pass from
+// its own logic — map iteration order, a re-allocated slice, and so on.
+//
+// It does NOT prove the Deployment is left unwritten, and cannot: the fake
+// client applies no server-side defaults and never maintains Generation, so
+// both would be zero however badly the operator behaved. The real assertion,
+// against an API server that defaults timeoutSeconds/periodSeconds/path/scheme
+// and therefore can churn, lives in the envtest spec "does not rewrite the
+// Deployment on repeated reconciles".
+func TestReconcileWithAProbeProducesTheSameTemplateTwice(t *testing.T) {
 	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
 		e.Spec.Services[0].ReadinessProbe = &corev1.Probe{}
 	}))
@@ -857,5 +864,4 @@ func TestReconcileWithAProbeIsIdempotent(t *testing.T) {
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &second))
 
 	assert.Equal(t, first.Spec.Template, second.Spec.Template)
-	assert.Equal(t, first.Generation, second.Generation, "a second reconcile must not roll the Deployment")
 }
