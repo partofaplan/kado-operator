@@ -116,13 +116,13 @@ helm install kado-operator ./charts/kado-operator \
   --namespace kado-operator-system --create-namespace
 ```
 
-To pin a specific published version — pick one from
+To pin a specific published version — `1.2.3` below stands in for one from
 [the tag list](https://hub.docker.com/r/partofaplan/kado-operator/tags):
 
 ```bash
 helm upgrade --install kado-operator ./charts/kado-operator \
   --namespace kado-operator-system --create-namespace \
-  --set image.tag=<version>
+  --set image.tag=1.2.3
 ```
 
 Chart values are documented in

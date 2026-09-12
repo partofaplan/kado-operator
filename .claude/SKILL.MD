@@ -104,10 +104,13 @@ catches it. Two different things can then fail, and only one of them is
 contained:
 
 - **`integration` fails.** `version` is gated on it, so no version is cut and
-  no image is published. `develop` carries a bad commit and no release.
+  no image is published. `develop` carries a bad commit and nothing shipped.
 - **`verify-picard` fails.** This runs *after* `publish`, so by then the
-  version **was** cut, the image **was** pushed, and `latest` **was** moved.
-  The release exists and is bad. `picard` is also left on the broken revision.
+  version **was** cut, the image **was** pushed, and `latest` **was** moved. A
+  bad build is on Docker Hub, and `picard` is left on the broken revision.
+
+No *release* is involved in either case. Releases are cut deliberately, and one
+would simply not be cut from a bad commit.
 
 Either way the fix goes forward through a normal loop, and reverting is always
 available and often faster. Do not read the first bullet as covering both.

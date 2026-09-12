@@ -57,14 +57,22 @@ jobs:
       # unexpected value is treated as a dry run rather than shipping.
       - name: Decide whether to publish
         id: mode
+        # Through env, not interpolated into the script. The fail-safe `case`
+        # below exists precisely because GitHub does not guarantee this value is
+        # a boolean, and a value that can be unexpected can also be hostile —
+        # rendering it into `run:` would put it inside a job holding
+        # contents: write and DOCKERHUB_TOKEN. Dispatch is the one way into this
+        # job that does not pass review, so it gets the careful form.
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          case "${{ inputs.dry_run }}" in
+          case "$DRY_RUN" in
             false|False|FALSE) publish=true ;;
             *)                 publish=false ;;
           esac
           echo "publish=${publish}" >> "$GITHUB_OUTPUT"
-          echo "dry_run input = '${{ inputs.dry_run }}' -> publish=${publish}"
+          echo "dry_run input = '${DRY_RUN}' -> publish=${publish}"
 
       - uses: actions/checkout@v4
         with:
