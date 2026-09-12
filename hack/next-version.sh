@@ -16,17 +16,29 @@ set -euo pipefail
 
 kind=${1:-}
 case "$kind" in
-  minor|major|release|last-release) ;;
-  *) echo "usage: $0 <minor|major|release|last-release>" >&2; exit 2 ;;
+  minor|major|release|last-release|first-tag) ;;
+  *) echo "usage: $0 <minor|major|release|last-release|first-tag>" >&2; exit 2 ;;
 esac
 
-# No `|| true` on the git call. Swallowing a git failure — run outside a repo,
-# or in a clone whose tags were not fetched — would look exactly like "no tags
-# exist", restart numbering at 0.0.1 and move every version backwards. That is
-# the outcome the malformed-tag guard below exists to prevent, reached by a
-# different door.
+# Three ways "no tags" can be a lie rather than a fact, each of which would
+# restart numbering at 0.0.1 and move every published version backwards — the
+# outcome the malformed-tag guard below exists to prevent, reached by other
+# doors.
+#
+# 1. Not a git repository at all.
 git rev-parse --git-dir >/dev/null 2>&1 \
   || { echo "::error::not a git repository; refusing to guess a version" >&2; exit 1; }
+
+# 2. A shallow clone, which can have no tags while the remote has many. Both
+#    callers use fetch-depth: 0, but that is one workflow edit away from
+#    changing, and the failure would be silent.
+if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+  echo "::error::shallow clone: tags may be missing, so any version computed here could move backwards. Use fetch-depth: 0." >&2
+  exit 1
+fi
+
+# 3. A git failure of any other kind. No `|| true` here: an error must not read
+#    as an empty tag list.
 tags=$(git tag --list 'v*')
 
 # A release tag is one where both MAJOR and MINOR are zero. That is what makes
@@ -34,6 +46,15 @@ tags=$(git tag --list 'v*')
 last_release=$(printf '%s\n' "$tags" | grep -E '^v[0-9]+\.0\.0$' | sort -V | tail -n1 || true)
 if [ "$kind" = "last-release" ]; then
   printf '%s\n' "$last_release"
+  exit 0
+fi
+
+# The oldest tag, used as the notes range for the FIRST release, when there is
+# no previous release to measure from. Lives here rather than inline in
+# release.yml so that tag-reading stays in one place — which is the whole
+# reason this script exists.
+if [ "$kind" = "first-tag" ]; then
+  printf '%s\n' "$(printf '%s\n' "$tags" | sort -V | head -n1 || true)"
   exit 0
 fi
 

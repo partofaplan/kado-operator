@@ -387,9 +387,18 @@ gh workflow run release.yml -f dry_run=false   # tag, publish, create the releas
 ```
 
 `dry_run` defaults to **true**: it builds every artifact and prints the notes it
-would publish, without tagging, pushing or releasing. Use it first. The version
-is tagged only after every artifact has been built, so a failed package cannot
-burn a release number.
+would publish, without tagging, pushing or releasing. Use it first.
+
+**The tag is created last, by the release-creation step itself.** That ordering
+is load-bearing: the tag is what `next-version.sh` counts from, so pushing it
+earlier meant a failed chart push left the number burned — a re-dispatch would
+compute the *next* release and the tag would stand with nothing behind it.
+
+The image and chart are still pushed before the tag exists. A failure after
+them is recoverable: a re-dispatch recomputes the same version and republishes
+both from the same source — an equivalent rebuild, though at a new digest,
+since neither is byte-reproducible. So in that one recovery path a version tag
+can move. Repeating a push beats burning a release number.
 
 The release package is everything a user needs to deploy the operator to a
 cluster of their own:
@@ -406,6 +415,12 @@ Notes are generated from the **pull requests merged since the previous release
 tag**, not since the previous tag. Every merge into `develop` or `main` cuts a
 tag, so the default "since the last tag" would describe a single merge rather
 than the release.
+
+On the *first* release there is no previous release to measure from, so the
+range falls back to the earliest tag in the repository
+(`./hack/next-version.sh first-tag`) and the notes cover the whole history.
+Leaving the range unset instead would have quietly fallen back to the previous
+tag — one merge.
 
 ### Image tags: the version, and `latest`
 

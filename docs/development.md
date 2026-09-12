@@ -122,8 +122,11 @@ they are ever changed back:
   would compute the next release and the tag would stand with nothing behind
   it.
 - The image and chart are pushed before that tag exists. A failure after them
-  is recoverable: a re-dispatch recomputes the same version and overwrites both
-  with identical content. Repeating a push beats burning a number.
+  is recoverable: a re-dispatch recomputes the same version and republishes
+  both from the same source — an equivalent rebuild, though at a new digest,
+  since neither a multi-arch image nor a packaged chart is byte-reproducible.
+  So in that one recovery path a version tag can move. Repeating a push beats
+  burning a release number, and it only happens after a release has failed.
 
 ## The local loop
 

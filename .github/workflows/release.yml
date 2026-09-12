@@ -72,7 +72,7 @@ jobs:
           # release notes would describe a single pull request instead of the
           # whole history. Fall back to the earliest tag in the repo.
           if [ -z "$prev" ]; then
-            prev=$(git tag --list 'v*' | sort -V | head -n1 || true)
+            prev=$(./hack/next-version.sh first-tag)
             [ -n "$prev" ] && echo "no previous release; measuring notes from the earliest tag ${prev}"
           fi
           echo "version=${next}" >> "$GITHUB_OUTPUT"
@@ -262,9 +262,12 @@ jobs:
       #
       # What can still be left behind on a failure after this point: the image
       # and the chart are already on Docker Hub. A re-dispatch recomputes the
-      # same version (no git tag was made) and overwrites both with identical
-      # content, which is safe. That is the deliberate trade — repeating a push
-      # beats burning a number.
+      # same version, since no git tag was made, and republishes both from the
+      # same source — an equivalent rebuild, though at a new digest, because a
+      # multi-arch image and a packaged chart are not byte-reproducible. So the
+      # version tag can move in that one recovery path. That is the deliberate
+      # trade: repeating a push beats burning a release number, and it only
+      # happens when a release has already failed.
       - name: Create the GitHub release and its tag
         if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@v2

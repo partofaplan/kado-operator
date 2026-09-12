@@ -93,6 +93,20 @@ check vfoo v1.2-rc1      -- release ERR
 #      through 10#. Verified by mutation: weakening this check alone changes no
 #      observable behaviour.
 
+echo "first-tag finds the oldest tag, for the first release's notes range"
+check v0.1 v0.9 v1.0.0   -- first-tag v0.1
+check v1.2.3 vfoo v0.9   -- first-tag v0.9
+
+echo "refuses a shallow clone, where absent tags may be a lie"
+shallow=$(mktemp -d)
+git clone -q --depth 1 --no-tags "file://$work" "$shallow/c" 2>/dev/null
+if (cd "$shallow/c" && "$SCRIPT" minor >/dev/null 2>&1); then
+  printf '  FAIL shallow clone produced a version\n'; fails=$((fails + 1))
+else
+  printf '  ok   shallow clone refused\n'
+fi
+rm -rf "$shallow"
+
 echo "refuses to run outside a git repository"
 if (cd /tmp && "$SCRIPT" minor >/dev/null 2>&1); then
   printf '  FAIL ran outside a repo and invented a version\n'; fails=$((fails + 1))
