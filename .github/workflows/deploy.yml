@@ -150,6 +150,14 @@ jobs:
           # Roll the release back if it never becomes ready, so a failed deploy
           # leaves the previous version running rather than a broken one.
           #
+          # That promise holds for a PINNED tag. For `latest` it does not:
+          # rollback restores the previous revision's template, which differs
+          # only in the deployedAt annotation below — the image reference is
+          # still `repo:latest`, so the replacement pods re-pull and get the
+          # same broken digest. Rollback restores the template, not the image.
+          # Deploying by digest is the only real fix, and that needs the chart
+          # to stop rendering repo:tag unconditionally.
+          #
           # At revision 1 there is nothing to roll back TO, so Helm uninstalls
           # instead — and because the chart templates the CRD, that removes it
           # and every DevEnvironment with it. Preflight guarantees no foreign
@@ -184,7 +192,10 @@ jobs:
           roll=()
           if [ "$TAG" = "latest" ]; then
             pull_policy=Always
-            roll+=( --set-string podAnnotations.deployedAt="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" )
+            # GITHUB_RUN_ATTEMPT needs runner >= 2.285.0. Self-hosted runners
+            # auto-update, but this workflow has never run on ours, so default
+            # it rather than let `set -u` abort the deploy on an old runner.
+            roll+=( --set-string podAnnotations.deployedAt="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}" )
           fi
 
           args=(
