@@ -138,8 +138,9 @@ runner), and its preflight requires a published image tag, which a feature
 branch never has. Until a workflow exists, run this on a machine that can
 reach `picard` and hold the one-at-a-time rule by not starting a second run.
 
-**Who it applies to:** every merge request except `develop` → `main`. See
-[below](#which-merges-are-exempt).
+**Who it applies to:** every merge request except the two documented
+exemptions — `develop` → `main`, and changes where every modified file is a
+`.md`. See [below](#which-merges-are-exempt).
 
 `picard` is a disposable test cluster. This gate uninstalls whatever operator
 is on it and deletes the CRD, which deletes every `DevEnvironment` with it.
@@ -208,6 +209,10 @@ kind: DevEnvironment
 metadata: { name: $ENV, namespace: default }
 spec:
   owner: live-verification
+  # Exercised so the ConfigMap path is covered: this renders a
+  # <env>-config ConfigMap that every service consumes via envFrom.
+  config:
+    LOG_LEVEL: debug
   storage: { size: 128Mi }
   services:
     # mountPath is required, not decoration. picard's default StorageClass is
@@ -216,13 +221,18 @@ spec:
     # it, the "PVC binds" assertion below fails on every single run, which
     # trains whoever runs this gate to ignore a failing assertion.
     - { name: redis, image: redis:7-alpine, port: 6379, mountPath: /data }
+    # A second service so "a Deployment and Service for EVERY service" is an
+    # assertion rather than a tautology at n=1.
+    - { name: postgres, image: postgres:16-alpine, port: 5432,
+        env: { POSTGRES_PASSWORD: verify, PGDATA: /var/lib/postgresql/data/pgdata } }
 YAML
 ```
 
 Then assert, with a timeout:
 
 - the namespace `$ENV` is created
-- a Deployment and Service exist for every service in the spec
+- a Deployment and Service exist for **every** service in the spec (two here)
+- the `$ENV-config` ConfigMap exists and carries the spec's `config` values
 - the PVC binds
 - `status.phase` reaches `Ready` with `readyServices == totalServices`
 - `Available` is true and `Degraded` is false
@@ -243,9 +253,12 @@ kubectl --context "$CTX" delete ns kado-operator-system --ignore-not-found
 # `k3d image rm` — k3d v5 only has `image import` — so prune through the
 # nodes' own container runtime. Do not silence this: a swallowed failure here
 # is why images piled up unnoticed.
+# Skip serverlb by name rather than by swallowing its error, so a genuine
+# failure on a real node still surfaces. Silencing is what hid this step
+# failing entirely, twice.
 IMG="docker.io/partofaplan/kado-operator:sha-$SHA"
-for n in $(docker ps --format '{{.Names}}' | grep k3d-picard); do
-  docker exec "$n" crictl rmi "$IMG" 2>/dev/null || true   # serverlb has no runtime
+for n in $(docker ps --format '{{.Names}}' | grep k3d-picard | grep -v serverlb); do
+  docker exec "$n" crictl rmi "$IMG"
 done
 docker image rm "$IMG" || true
 ```
@@ -1181,8 +1194,8 @@ gh pr create --base main --head develop \
 ```
 
 A promotion does **not** re-run the picard verification gate. Everything in it
-already passed that gate on its way into `develop`, and a release must not
-depend on a disposable dev cluster being up.
+that could affect cluster behaviour already passed that gate on its way into
+`develop`, and a release must not depend on a disposable dev cluster being up.
 
 That push tags `v2.0`, publishes `partofaplan/kado-operator:2.0` and moves
 `latest`, pushes the chart as `2.0.0`, and creates the GitHub release.
@@ -1222,9 +1235,10 @@ be written quickly and least likely to have been thought through.
 Merging it to `main` cuts the next MAJOR, because `main` only ever produces
 MAJOR versions.
 
-A hotfix **does** run the live verification gate. Only `develop` → `main` is
-exempt, and a hotfix never passes through `develop`, so it has never been
-verified anywhere.
+A hotfix **does** run the live verification gate: it never passes through
+`develop`, so it has never been verified anywhere. The one exception is the
+documentation exemption — a hotfix touching only `.md` files still cannot
+change what the operator does, so it is exempt like any other doc-only change.
 
 Afterwards, back-merge `main` into `develop` through a merge request, as above.
 That is the only route by which the fix reaches `develop`.
