@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,7 +65,9 @@ func newReconciler(t *testing.T, objs ...client.Object) (*DevEnvironmentReconcil
 		WithObjects(objs...).
 		WithStatusSubresource(&devenvv1alpha1.DevEnvironment{}).
 		Build()
-	return &DevEnvironmentReconciler{Client: c, Scheme: s}, c
+	// APIReader is wired so the nil-fallback in reader() is not the only path
+	// the tests ever exercise; production passes mgr.GetAPIReader().
+	return &DevEnvironmentReconciler{Client: c, Scheme: s, APIReader: c}, c
 }
 
 func newEnv(mutators ...func(*devenvv1alpha1.DevEnvironment)) *devenvv1alpha1.DevEnvironment {
@@ -611,7 +614,10 @@ func TestReconcileRequeuesWhileServicesAreNotReady(t *testing.T) {
 
 	res, err := r.Reconcile(ctx, request())
 	require.NoError(t, err)
-	assert.Equal(t, notReadyRequeue, res.RequeueAfter, "an unready environment must schedule its own re-examination")
+	// A literal, not notReadyRequeue: asserting against the constant passes for
+	// any value including zero, which is the bug this test exists to catch.
+	assert.Equal(t, 30*time.Second, res.RequeueAfter, "an unready environment must schedule its own re-examination")
+	assert.Positive(t, res.RequeueAfter)
 
 	var d appsv1.Deployment
 	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &d))
@@ -621,4 +627,125 @@ func TestReconcileRequeuesWhileServicesAreNotReady(t *testing.T) {
 	res, err = r.Reconcile(ctx, request())
 	require.NoError(t, err)
 	assert.Zero(t, res.RequeueAfter, "a ready environment must stop requeuing")
+}
+
+// A crash-looping container is Waiting only between restarts; when the backoff
+// expires it is Running again until it dies. A reconcile landing in that window
+// used to see nothing wrong and flip Degraded back to false.
+func TestReconcileKeepsDegradedWhileAContainerIsRestarting(t *testing.T) {
+	pod := crashingPod("redis", "CrashLoopBackOff", nil)
+	pod.Status.ContainerStatuses[0] = corev1.ContainerStatus{
+		Name:                 "redis",
+		Ready:                false,
+		RestartCount:         6,
+		State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+	}
+	r, c := newReconciler(t, newEnv(), pod)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+	d := meta.FindStatusCondition(env.Status.Conditions, devenvv1alpha1.ConditionDegraded)
+	require.NotNil(t, d)
+	assert.Equal(t, metav1.ConditionTrue, d.Status, "a container that keeps dying must stay degraded between restarts")
+	assert.Contains(t, d.Message, "restarting after failure")
+	assert.Contains(t, d.Message, "6 restart(s)")
+}
+
+// The inverse guard: an environment is inspected whenever ANY service is
+// unready, so a healthy service that restarted once during startup must not be
+// reported alongside the one that is genuinely broken.
+func TestWorkloadProblemsIgnoresAReadyContainerWithRestartHistory(t *testing.T) {
+	pod := crashingPod("redis", "CrashLoopBackOff", nil)
+	pod.Status.ContainerStatuses[0] = corev1.ContainerStatus{
+		Name:                 "redis",
+		Ready:                true,
+		RestartCount:         3,
+		State:                corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+	}
+	r, _ := newReconciler(t, newEnv(), pod)
+	assert.Empty(t, r.workloadProblems(context.Background(), newEnv(), targetNS))
+}
+
+// An init container that never succeeds blocks the pod; the app container below
+// it only ever reports ContainerCreating, which reads as "still starting".
+func TestPodProblemReportsInitContainerFailures(t *testing.T) {
+	pod := crashingPod("redis", "PodInitializing", nil)
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+		Name:                 "wait-for-db",
+		State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 2}},
+	}}
+	got := podProblem(pod)
+	assert.Contains(t, got, "init container")
+	assert.Contains(t, got, "wait-for-db")
+	assert.Contains(t, got, "exit code 2")
+}
+
+// "exit code 137" alone sends people to the logs, which explain nothing about
+// an OOM kill.
+func TestPodProblemNamesTheTerminationReason(t *testing.T) {
+	pod := crashingPod("redis", "CrashLoopBackOff", nil)
+	pod.Status.ContainerStatuses[0].LastTerminationState = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"},
+	}
+	assert.Contains(t, podProblem(pod), "OOMKilled, exit code 137")
+}
+
+// Two broken services must both be reported, in a stable order.
+func TestWorkloadProblemsReportsEveryBrokenServiceSorted(t *testing.T) {
+	exit := int32(1)
+	env := newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Services = append(e.Spec.Services, devenvv1alpha1.ServiceSpec{
+			Name: "postgres", Image: "postgres:16-alpine", Port: 5432,
+		})
+	})
+	r, _ := newReconciler(t, env,
+		crashingPod("redis", "CrashLoopBackOff", &exit),
+		crashingPod("postgres", "ImagePullBackOff", nil),
+	)
+	// Spec order is redis then postgres, and the output must follow it on every
+	// call — not the map's randomised iteration order.
+	want := []string{
+		`service "redis": CrashLoopBackOff (container "redis" last exited with exit code 1); ` +
+			"see `kubectl logs -n " + targetNS + " redis-abc123`",
+		`service "postgres": ImagePullBackOff`,
+	}
+	for i := 0; i < 20; i++ {
+		assert.Equal(t, want, r.workloadProblems(context.Background(), env, targetNS),
+			"the condition message must be byte-identical across reconciles")
+	}
+}
+
+// ReadyReplicas > 0 reported a 3-replica service ready as soon as one pod came
+// up, hiding two permanently crash-looping replicas and stopping the requeue.
+func TestReconcileRequiresEveryRequestedReplicaToBeReady(t *testing.T) {
+	three := int32(3)
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Services[0].Replicas = &three
+	}))
+	ctx := context.Background()
+	reconcile(t, r)
+
+	var d appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &d))
+	d.Status.ReadyReplicas = 1
+	require.NoError(t, c.Status().Update(ctx, &d))
+
+	res, err := r.Reconcile(ctx, request())
+	require.NoError(t, err)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(ctx, request().NamespacedName, &env))
+	assert.Equal(t, int32(0), env.Status.ReadyServices, "1 of 3 replicas is not a ready service")
+	assert.Equal(t, devenvv1alpha1.PhaseProvisioning, env.Status.Phase)
+	assert.Positive(t, res.RequeueAfter, "a partially-rolled-out service must keep being revisited")
+
+	d.Status.ReadyReplicas = 3
+	require.NoError(t, c.Status().Update(ctx, &d))
+	reconcile(t, r)
+	require.NoError(t, c.Get(ctx, request().NamespacedName, &env))
+	assert.Equal(t, devenvv1alpha1.PhaseReady, env.Status.Phase)
 }

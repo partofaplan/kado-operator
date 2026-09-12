@@ -115,7 +115,7 @@ Services reach each other by name inside the namespace:
 
 | Field | Description |
 | --- | --- |
-| `phase` | `Pending`, `Provisioning`, `Ready` or `Failed`. A summary for humans; conditions carry the detail. |
+| `phase` | `Pending`, `Provisioning`, `Ready` or `Failed`. A summary for humans; conditions carry the detail. `Provisioning` does not imply healthy — check `Degraded`, which `kubectl get devenvironments` now shows as a column. |
 | `namespace` | The namespace actually provisioned. |
 | `readyServices` / `totalServices` | How many services have at least one ready replica. |
 | `observedGeneration` | The spec generation this status was computed from. |
@@ -156,6 +156,7 @@ kubectl describe devenvironment team-alpha
 | --- | --- |
 | `Degraded=True`, "not managed by this DevEnvironment" | The target namespace already exists and belongs to something else. Pick a different `namespaceName`. |
 | `Degraded=True`, "reading source secret" | A name in `secretRefs` does not exist in the `DevEnvironment`'s own namespace. |
-| Stuck at `Provisioning` | Pods are not becoming ready. `kubectl get pods -n <env>` and check image pulls and resource requests. |
+| `Degraded=True`, reason `WorkloadUnhealthy` | A container cannot start. The message names the service, the blocking reason (`CrashLoopBackOff`, `ImagePullBackOff`, `Unschedulable`, …), the last exit code and the `kubectl logs` command that shows why. A missing required env var — `POSTGRES_PASSWORD`, say — lands here. |
+| Stuck at `Provisioning` with `Degraded=False` | Pods are still coming up and nothing has gone wrong yet. If it persists, check image pull times, and whether a PVC is waiting for a consumer — a volume no service mounts stays `Pending` forever. |
 | Stuck deleting | The namespace is still terminating, usually a finalizer on something inside it. `kubectl get ns <env> -o yaml`. |
 | `helm install` rejects the CRD as not Helm-owned | The CRD was installed by `make install` (kustomize). See [CRD ownership](development.md#crd-ownership-make-install-vs-the-chart). |

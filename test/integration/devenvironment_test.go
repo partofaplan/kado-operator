@@ -76,7 +76,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	reconciler := &controller.DevEnvironmentReconciler{Client: mgr.GetClient(), Scheme: scheme}
+	reconciler := &controller.DevEnvironmentReconciler{
+		Client: mgr.GetClient(),
+		Scheme: scheme,
+		// Must match cmd/main.go. Without it reader() falls back to the cached
+		// client, which starts a cluster-wide pod informer inside Reconcile —
+		// the exact thing the uncached read exists to avoid, and it would mean
+		// the one suite that runs against a real cluster proved the wrong path.
+		APIReader: mgr.GetAPIReader(),
+	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		fmt.Fprintf(os.Stderr, "wiring controller: %v\n", err)
 		os.Exit(1)

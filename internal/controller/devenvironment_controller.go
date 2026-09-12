@@ -371,7 +371,17 @@ func (r *DevEnvironmentReconciler) reconcileService(
 		return false, fmt.Errorf("reconciling service %q: %w", spec.Name, err)
 	}
 
-	return deploy.Status.ReadyReplicas > 0, nil
+	// Compare against the requested replica count, not zero. With
+	// `ReadyReplicas > 0` a Deployment asking for three replicas reported the
+	// service ready as soon as one came up, so two permanently crash-looping
+	// replicas were invisible — and the not-ready requeue stopped, meaning
+	// nothing ever revisited them. Replicas defaults to 1, so single-replica
+	// services behave exactly as before.
+	desired := int32(1)
+	if spec.Replicas != nil {
+		desired = *spec.Replicas
+	}
+	return deploy.Status.ReadyReplicas >= desired, nil
 }
 
 // container builds the pod container for a service, wiring in the environment
@@ -555,6 +565,8 @@ var blockingWaitReasons = map[string]bool{
 	"CrashLoopBackOff":           true,
 	"ImagePullBackOff":           true,
 	"ErrImagePull":               true,
+	"ErrImageNeverPull":          true,
+	"ImageInspectError":          true,
 	"InvalidImageName":           true,
 	"CreateContainerConfigError": true,
 	"CreateContainerError":       true,
@@ -591,13 +603,16 @@ func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *de
 		}
 	}
 
+	// Emitted in spec order rather than by ranging the map, so the message is
+	// byte-identical across reconciles by construction. Go randomises map
+	// iteration, which would otherwise reshuffle the message on every pass —
+	// pure write churn, and a test for it could only ever be probabilistic.
 	out := make([]string, 0, len(byService))
-	for svc, detail := range byService {
-		out = append(out, fmt.Sprintf("service %q: %s", svc, detail))
+	for i := range env.Spec.Services {
+		if detail := byService[env.Spec.Services[i].Name]; detail != "" {
+			out = append(out, fmt.Sprintf("service %q: %s", env.Spec.Services[i].Name, detail))
+		}
 	}
-	// Sorted so the condition message is stable across reconciles; an unstable
-	// message would rewrite lastTransitionTime on every pass.
-	slices.Sort(out)
 	return out
 }
 
@@ -610,26 +625,72 @@ func podProblem(pod *corev1.Pod) string {
 			return fmt.Sprintf("Unschedulable: %s", c.Message)
 		}
 	}
-	for i := range pod.Status.ContainerStatuses {
-		cs := &pod.Status.ContainerStatuses[i]
-		w := cs.State.Waiting
-		if w == nil || !blockingWaitReasons[w.Reason] {
-			continue
+	// Init containers first: one that never succeeds blocks the pod entirely,
+	// and the app containers below it would report only ContainerCreating,
+	// which reads as "still starting" forever. The operator does not create
+	// init containers, but reconcileService only overwrites Containers and
+	// Volumes, so one added by hand survives every reconcile.
+	for i := range pod.Status.InitContainerStatuses {
+		if d := containerProblem(&pod.Status.InitContainerStatuses[i], pod, "init container"); d != "" {
+			return d
 		}
+	}
+	for i := range pod.Status.ContainerStatuses {
+		if d := containerProblem(&pod.Status.ContainerStatuses[i], pod, "container"); d != "" {
+			return d
+		}
+	}
+	return ""
+}
+
+// containerProblem describes why a single container cannot run.
+func containerProblem(cs *corev1.ContainerStatus, pod *corev1.Pod, kind string) string {
+	// A container that is passing its readiness probe right now is not a
+	// problem, whatever its history. This matters because an environment is
+	// inspected whenever ANY service is unready, so a healthy service that
+	// restarted once during startup must not be reported alongside the one
+	// that is actually broken.
+	if cs.Ready {
+		return ""
+	}
+
+	if w := cs.State.Waiting; w != nil && blockingWaitReasons[w.Reason] {
 		// CrashLoopBackOff's own waiting message is only "back-off 5m0s
 		// restarting failed container", which says nothing about the cause.
-		// The previous termination carries the exit code, and the logs carry
-		// the rest — so point at them.
+		// The previous termination carries the exit code and reason.
 		if t := cs.LastTerminationState.Terminated; t != nil && w.Reason == "CrashLoopBackOff" {
-			return fmt.Sprintf("%s (container %q last exited with code %d); see `kubectl logs -n %s %s`",
-				w.Reason, cs.Name, t.ExitCode, pod.Namespace, pod.Name)
+			return fmt.Sprintf("%s (%s %q last exited with %s); see `kubectl logs -n %s %s`",
+				w.Reason, kind, cs.Name, terminationDetail(t), pod.Namespace, pod.Name)
 		}
 		if w.Message != "" {
 			return fmt.Sprintf("%s: %s", w.Reason, w.Message)
 		}
 		return w.Reason
 	}
+
+	// A crash-looping container is Waiting only *between* restarts. Once the
+	// backoff expires it is Running again until it dies, and a reconcile that
+	// lands in that window would otherwise see nothing wrong — flipping
+	// Degraded back to false and rewriting both conditions' transition times
+	// on every poll. Restart history is the stable signal.
+	if cs.RestartCount > 0 {
+		if t := cs.LastTerminationState.Terminated; t != nil && t.ExitCode != 0 {
+			return fmt.Sprintf("restarting after failure (%s %q exited with %s, %d restart(s)); see `kubectl logs -n %s %s`",
+				kind, cs.Name, terminationDetail(t), cs.RestartCount, pod.Namespace, pod.Name)
+		}
+	}
 	return ""
+}
+
+// terminationDetail renders an exit, naming the kubelet's reason when it adds
+// something an exit code does not. OOMKilled is the case that matters: the
+// container logs explain nothing, so "exit code 137" alone sends people to the
+// wrong place.
+func terminationDetail(t *corev1.ContainerStateTerminated) string {
+	if t.Reason != "" && t.Reason != "Error" {
+		return fmt.Sprintf("%s, exit code %d", t.Reason, t.ExitCode)
+	}
+	return fmt.Sprintf("exit code %d", t.ExitCode)
 }
 
 func (r *DevEnvironmentReconciler) setFailed(ctx context.Context, env *devenvv1alpha1.DevEnvironment, cause error) error {
