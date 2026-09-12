@@ -43,6 +43,12 @@ jobs:
           version: v2.3.0
           args: --timeout=5m
 
+      # Cheap, and it guards the arithmetic that decides what gets tagged and
+      # published. Lives here rather than in its own job because it takes a
+      # second and this job is already the shortest on the critical path.
+      - name: Test the version scripts
+        run: make test-scripts
+
   generated:
     name: Generated code is up to date
     runs-on: ubuntu-latest
@@ -267,49 +273,32 @@ jobs:
       cancel-in-progress: false
     outputs:
       version: ${{ steps.next.outputs.version }}
-      chart: ${{ steps.next.outputs.chart }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # tags are the source of truth; we need all of them
 
+      # RELEASE.MAJOR.MINOR. develop moves MINOR, main moves MAJOR, and only a
+      # release package moves RELEASE — which is why this job never computes a
+      # release version. That lives in release.yml, triggered deliberately.
+      #
+      # The arithmetic is in hack/next-version.sh rather than inline because
+      # release.yml needs the same rules, and two copies would eventually
+      # disagree about what "next" means. It has its own tests.
       - name: Compute next version
         id: next
         env:
           BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Match ONLY strict vMAJOR.MINOR. A glob like 'v[0-9]*.[0-9]*' would
-          # also match v1.2-rc1 or v1.2.3, and the arithmetic below would then
-          # expand a non-numeric minor into an empty version.
-          strict=$(git tag --list 'v*' --sort=-v:refname \
-                     | grep -E '^v[0-9]+\.[0-9]+$' | head -n1 || true)
-          # If v* tags exist but none are well formed, numbering would silently
-          # restart at v0.1 and move the version backwards. Fail instead.
-          if [[ -z "$strict" && -n "$(git tag --list 'v*' | head -n1)" ]]; then
-            echo "::error::v* tags exist but none match vMAJOR.MINOR; refusing to restart numbering"
-            exit 1
-          fi
-          latest=${strict:-v0.0}
-          ver=${latest#v}
-          major=${ver%%.*}
-          minor=${ver#*.}
-          # 10# forces base 10: a tag like v1.08 would otherwise be read as
-          # octal and abort with "value too great for base".
           case "$BRANCH" in
-            develop) next="${major}.$((10#$minor + 1))" ;;   # MINOR on every dev build
-            main)    next="$((10#$major + 1)).0" ;;          # MAJOR on promotion
+            develop) kind=minor ;;
+            main)    kind=major ;;
             *)       echo "::error::refusing to version branch $BRANCH"; exit 1 ;;
           esac
-          [[ "$next" =~ ^[0-9]+\.[0-9]+$ ]] \
-            || { echo "::error::computed bad version '$next' from '$latest'"; exit 1; }
-          if git rev-parse -q --verify "refs/tags/v${next}" >/dev/null; then
-            echo "::error::tag v${next} already exists"; exit 1
-          fi
+          next=$(./hack/next-version.sh "$kind")
           echo "version=${next}" >> "$GITHUB_OUTPUT"
-          # Helm demands full SemVer2, so the chart carries an explicit patch.
-          echo "chart=${next}.0" >> "$GITHUB_OUTPUT"
-          echo "\`$latest\` → \`v${next}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$BRANCH\` (${kind}) → \`v${next}\`" >> "$GITHUB_STEP_SUMMARY"
 
       # The tag is pushed before the image is built. If `publish` then fails,
       # the tag exists with no image behind it: use "Re-run failed jobs" to
@@ -654,101 +643,3 @@ jobs:
             exit 1
           fi
           echo "namespace reclaimed, finalizer released"
-
-  # Only a promotion to main produces a release artifact set.
-  release:
-    name: Publish release
-    needs: [ version, publish ]
-    if: github.ref_name == 'main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # make helm-crds and make build-installer run controller-gen and
-      # kustomize, both `go install`ed into bin/. Without Go pinned from
-      # go.mod they would rely on whatever the runner happens to ship.
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # controller-gen, kustomize and the envtest control-plane binaries are
-      # `go install`ed into bin/, which setup-go's module cache does not cover.
-      # Without this they were re-downloaded on every job of every run.
-      #
-      # The key is per-job on purpose. Each job populates bin/ with a different
-      # subset — `generated` installs only controller-gen, `test` adds
-      # setup-envtest and the control-plane binaries, `integration` adds
-      # kustomize — and actions/cache does not save on a hit. With one shared
-      # key the first job to miss froze its partial bin/ for everyone, and the
-      # jobs needing more kept downloading it on every run.
-      - name: Cache tool binaries
-        uses: actions/cache@v4
-        with:
-          path: bin
-          key: kado-bin-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Makefile', 'go.mod') }}
-
-      - name: Package and push Helm chart
-        env:
-          V: ${{ needs.version.outputs.version }}
-          CHART: ${{ needs.version.outputs.chart }}
-        run: |
-          set -euo pipefail
-          make helm-crds
-          # appVersion must be a tag that is actually published: the chart
-          # defaults image.tag to .Chart.AppVersion, and publish pushes the
-          # unprefixed "2.0", not "v2.0". A v-prefixed appVersion here renders
-          # an image reference that does not exist and ImagePullBackOffs.
-          helm package charts/kado-operator \
-            --version "$CHART" --app-version "$V" --destination dist/
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
-            --username "${{ env.DOCKERHUB_USER }}" --password-stdin
-          helm push "dist/kado-operator-${CHART}.tgz" oci://registry-1.docker.io/partofaplan
-
-      - name: Build install manifest
-        run: make build-installer IMG=${{ env.IMAGE }}:${{ needs.version.outputs.version }}
-
-      - name: Compose release notes
-        env:
-          V: ${{ needs.version.outputs.version }}
-          CHART: ${{ needs.version.outputs.chart }}
-          DIGEST: ${{ needs.publish.outputs.digest }}
-        run: |
-          {
-            echo "## Install"
-            echo
-            echo '```bash'
-            echo "helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \\"
-            echo "  --version ${CHART} --namespace kado-operator-system --create-namespace"
-            echo '```'
-            echo
-            echo "Or apply the bundled manifest:"
-            echo
-            echo '```bash'
-            echo "kubectl apply -f https://github.com/${{ github.repository }}/releases/download/v${V}/install.yaml"
-            echo '```'
-            echo
-            echo "## Container image"
-            echo
-            echo '```'
-            echo "${{ env.IMAGE }}:${V}"
-            echo "${{ env.IMAGE }}@${DIGEST}"
-            echo '```'
-            echo
-            echo "Pin the digest for reproducible deployments."
-          } > RELEASE.md
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.version.outputs.version }}
-          name: v${{ needs.version.outputs.version }}
-          body_path: RELEASE.md
-          generate_release_notes: true
-          files: |
-            dist/install.yaml
-            dist/kado-operator-*.tgz

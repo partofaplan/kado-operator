@@ -76,6 +76,13 @@ test-only: setup-envtest ## Run tests, assuming generated code is already curren
 # Integration tests act on whatever cluster the current kubectl context points
 # at, so the same suite validates a local cluster, a CI cluster, or a remote
 # one. Creating a cluster is a separate, optional concern (see cluster-* below).
+# Shell tests for hack/*.sh. The version arithmetic is shell that CI calls
+# directly, and getting it wrong mints an immutable tag and publishes an image
+# under it — neither of which can be moved afterwards.
+.PHONY: test-scripts
+test-scripts: ## Run the shell tests under hack/.
+	./hack/next-version_test.sh
+
 .PHONY: test-integration
 test-integration: manifests generate fmt vet test-integration-only ## Run integration tests against the current kubectl context.
 

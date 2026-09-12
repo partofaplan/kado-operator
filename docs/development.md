@@ -82,7 +82,7 @@ git branch -d feature/my-change
 # finish it: Definition of Done first, then a reviewed merge request
 gh pr create --base develop --fill
 /code-review <pr-number>          # a DIFFERENT agent evaluates it
-# merge only on APPROVE — the merge cuts the next MINOR
+# merge only on APPROVE — the merge cuts the next MINOR (v1.2.3 -> v1.2.4)
 
 # cut a release: promote develop to main, reviewed the same way
 gh pr create --base main --head develop --title "Release: promote develop to main" --fill
@@ -317,8 +317,9 @@ as `docker.io/partofaplan/kado-operator`:
 | Trigger | Version | Image tags |
 | --- | --- | --- |
 | push to a feature branch | none assigned | none published — no workflow runs at all until a pull request is open |
-| merge into `develop` | MINOR increments (`v1.4` → `v1.5`) | `1.5`, `latest` |
-| merge into `main` | MAJOR increments (`v1.5` → `v2.0`) | `2.0`, `latest` |
+| merge into `develop` | MINOR increments (`v1.2.3` → `v1.2.4`) | `1.2.4`, `latest` |
+| merge into `main` | MAJOR increments (`v1.2.4` → `v1.3.0`) | `1.3.0`, `latest` |
+| release dispatch | RELEASE increments (`v1.3.0` → `v2.0.0`) | `2.0.0`, `latest`, plus the chart and the GitHub release |
 
 Versions come from the highest existing `v*` tag, so the tags are the source
 of truth — there is no VERSION file to drift. Never create a `v*` tag by
@@ -330,7 +331,7 @@ Every image is built for `linux/amd64` and `linux/arm64`.
 `latest` tracks whatever was published most recently, which — because versions
 only ever increase — is the newest release on either branch. That includes
 development builds, so `latest` is a convenience, not a stability channel: pin
-the `MAJOR.MINOR` tag or a digest whenever the build must be reproducible, such
+the version tag or a digest whenever the build must be reproducible, such
 as a pinned deployment, a bug report or a rollback. Each CI run prints the
 digest it published in its job summary.
 
