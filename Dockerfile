@@ -25,10 +25,13 @@ COPY internal/ internal/
 # Build. TARGETOS/TARGETARCH are supplied by buildx per target platform; they
 # fall back to the host's values for a plain `docker build`.
 #
-# No -a. kubebuilder scaffolds it, but it forces every package including the
-# standard library to be rebuilt, defeating Go's own build cache for no benefit
-# here — the binary is already static and CGO-free. Measured on a cold builder,
-# two platforms: 84s with -a, 74s without.
+# No -a. kubebuilder scaffolds it, but it is a pre-Go-1.10 relic from when the
+# shipped standard library archives were cgo-enabled. With Go's content-
+# addressed build cache it forces every package including the stdlib to be
+# rebuilt for no change in output: the binaries built with and without it are
+# byte-identical (same SHA-256, same BuildID), still statically linked, still
+# CGO-free, and still run under distroless/static. It only costs time — 84s vs
+# 74s for two platforms on a cold builder.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o manager cmd/main.go
 
 # Use distroless as minimal base image to package the manager binary

@@ -135,10 +135,11 @@ jobs:
   # it belongs on its own parallel track — with a layer cache, which it never
   # had there.
   #
-  # The gha layer cache makes this ~20s when no Go file changed, and does
-  # nothing when one did: the `go build` layer's input is the source, so it
-  # rebuilds by definition. That is inherent, not a cache misconfiguration.
-  # What is tunable is how many platforms get compiled.
+  # The gha layer cache makes this ~20s when no Go file changed. When one did,
+  # the `go mod download` layer above still hits — it is keyed on go.mod and
+  # go.sum — but `go build` and everything below it rebuild, because their
+  # input is the source. That is inherent, not a cache misconfiguration. What
+  # is tunable is how many platforms get compiled.
   image:
     name: Image builds
     runs-on: ubuntu-latest
@@ -334,8 +335,9 @@ jobs:
       # Belt and braces. The Dockerfile pins its builder stage to $BUILDPLATFORM
       # and the runtime stage only COPYs a binary, so no foreign-arch
       # instruction ever executes — the `image` job builds both platforms
-      # without QEMU. Kept here because this job pushes release artifacts and
-      # the cost is a few seconds.
+      # without QEMU on develop and main, which is the only event this job runs
+      # on. Kept here because this job pushes release artifacts and the cost is
+      # a few seconds.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
