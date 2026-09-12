@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Image tag to deploy (e.g. develop, 0.2, sha-72a92f7)'
+        description: 'Image tag to deploy: a MAJOR.MINOR version (e.g. 0.4) or latest'
         required: true
-        default: 'develop'
+        default: 'latest'
         type: string
       namespace:
         description: 'Namespace to install the operator into'

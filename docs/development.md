@@ -270,8 +270,8 @@ as `docker.io/partofaplan/kado-operator`:
 | Trigger | Version | Image tags |
 | --- | --- | --- |
 | push to a feature branch | none assigned | none published |
-| merge into `develop` | MINOR increments (`v1.4` → `v1.5`) | `1.5`, `develop`, `sha-<short>` |
-| merge into `main` | MAJOR increments (`v1.5` → `v2.0`) | `2.0`, `main`, `sha-<short>`, `latest` |
+| merge into `develop` | MINOR increments (`v1.4` → `v1.5`) | `1.5`, `latest` |
+| merge into `main` | MAJOR increments (`v1.5` → `v2.0`) | `2.0`, `latest` |
 
 Versions come from the highest existing `v*` tag, so the tags are the source
 of truth — there is no VERSION file to drift. Never create a `v*` tag by
@@ -280,11 +280,18 @@ reassigns every version after it.
 
 Every image is built for `linux/amd64` and `linux/arm64`.
 
-`latest` deliberately tracks the newest *release*, not the tip of a branch, so
-`docker pull ...:latest` cannot hand someone unreleased work. Use `develop`
-for the newest merged work, and `sha-<short>` or a digest whenever the build
-must be reproducible — a pinned deployment, a bug report, a rollback. Each CI
-run prints the digest it published in its job summary.
+`latest` tracks whatever was published most recently, which — because versions
+only ever increase — is the newest release on either branch. That includes
+development builds, so `latest` is a convenience, not a stability channel: pin
+the `MAJOR.MINOR` tag or a digest whenever the build must be reproducible, such
+as a pinned deployment, a bug report or a rollback. Each CI run prints the
+digest it published in its job summary.
+
+Nothing else is published. `sha-<short>` and floating branch tags were dropped:
+every commit that reaches a publish already has a version of its own, so those
+were a second and third name for one image, and three naming schemes for the
+same artifact is three chances to deploy something other than what you meant.
+Tags pushed under the old scheme remain on Docker Hub but are frozen.
 
 CI needs one repository secret, `DOCKERHUB_TOKEN`: a Docker Hub access token
 with Read/Write scope, never the account password. Create it at

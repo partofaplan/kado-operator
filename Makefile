@@ -62,14 +62,28 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
+test: manifests generate fmt vet test-only ## Run tests.
+
+# Same tests without the codegen prerequisites. Exists for CI, where the
+# `generated` job already regenerates and diffs everything: having the test
+# jobs repeat that work put two more controller-gen downloads on the critical
+# path for no extra coverage. Run `make test` locally — it regenerates first,
+# so you cannot accidentally test stale code.
+.PHONY: test-only
+test-only: setup-envtest ## Run tests, assuming generated code is already current.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # Integration tests act on whatever cluster the current kubectl context points
 # at, so the same suite validates a local cluster, a CI cluster, or a remote
 # one. Creating a cluster is a separate, optional concern (see cluster-* below).
 .PHONY: test-integration
-test-integration: manifests generate fmt vet install ## Run integration tests against the current kubectl context.
+test-integration: manifests generate fmt vet test-integration-only ## Run integration tests against the current kubectl context.
+
+# See test-only above for why this split exists. `install` stays a prerequisite
+# here rather than moving up: the suite needs the CRD applied to the cluster,
+# which is a runtime requirement, not a codegen one.
+.PHONY: test-integration-only
+test-integration-only: install ## Run integration tests, assuming generated code is already current.
 	@echo "Running integration tests against context: $$(kubectl config current-context)"
 	# -count=1 disables result caching: cluster state changes even when code does not.
 	go test -tags=integration ./test/integration/... -v -count=1 -timeout 15m
