@@ -23,8 +23,9 @@ All notable changes to this project are documented here. The format follows
 - The Dockerfile build moved out of the `integration` job into its own
   parallel `image` job with a layer cache. It consumed ~99s of the critical
   path where nothing used its output.
-- CI caches `bin/`, so `controller-gen`, `kustomize` and the envtest
-  control-plane binaries are no longer re-downloaded in every job of every run.
+- CI caches `bin/` under a per-job key, so `controller-gen`, `kustomize` and
+  the envtest control-plane binaries are no longer re-downloaded in every job
+  of every run.
 - `.claude/SKILL.MD` rewritten so each rule and rationale is stated exactly
   once, and so it links to `Makefile` and `.github/workflows/ci.yml` rather
   than embedding copies that had already drifted from them.

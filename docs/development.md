@@ -248,7 +248,13 @@ both; `make run` will not catch the difference because it uses your kubeconfig.
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `ci.yml` | pushes and PRs | lint, unit + envtest, generated-code check, integration on an ephemeral cluster; on `develop`/`main` also assign the version, tag, publish the image, and on `main` publish the release |
+| `ci.yml` | pull requests into `develop`/`main`, and pushes to those two branches | lint, unit + envtest, generated-code check, a two-platform Dockerfile build, and integration on an ephemeral cluster; on `develop`/`main` also assign the version, tag, publish the image, and on `main` publish the release |
+
+Feature and hotfix branches are covered by the pull request trigger, which
+tests the merge result rather than the branch tip. They are deliberately not in
+the `push` trigger: listing both ran the whole pipeline twice for every commit
+on an open pull request, in two concurrency groups that could not cancel each
+other.
 
 Everything lives in one workflow on purpose. A workflow cannot declare a
 `needs` dependency on a different workflow, so with integration tests in their
@@ -269,7 +275,7 @@ as `docker.io/partofaplan/kado-operator`:
 
 | Trigger | Version | Image tags |
 | --- | --- | --- |
-| push to a feature branch | none assigned | none published |
+| push to a feature branch | none assigned | none published — no workflow runs at all until a pull request is open |
 | merge into `develop` | MINOR increments (`v1.4` → `v1.5`) | `1.5`, `latest` |
 | merge into `main` | MAJOR increments (`v1.5` → `v2.0`) | `2.0`, `latest` |
 

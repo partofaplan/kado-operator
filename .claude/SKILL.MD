@@ -177,11 +177,12 @@ it is never pushed, and the registry carries no sha tags (see
 
 ```bash
 SHA=$(git rev-parse --short HEAD)
-# The CONTEXT is `picard`; the k3d CLUSTER it points at is `k3d-picard`. They
-# are not interchangeable — `kubectl --context k3d-picard` fails with "no
-# context exists", while `make cluster-load LOCAL_CLUSTER=` wants the cluster
-# name. Confirm with `kubectl config get-contexts` if a command reports either
-# name as missing.
+# Both the kubectl CONTEXT and the k3d CLUSTER are named `picard`, so CTX and
+# LOCAL_CLUSTER below take the same value. `k3d-picard` is neither: it is only
+# the kubeconfig cluster-entry name and the node-container prefix, which is why
+# `kubectl --context k3d-picard` fails with "no context exists". Confirm with
+# `kubectl config get-contexts` and `k3d cluster list` if either is reported
+# missing.
 CTX=picard
 
 # Gate 2 runs `make test-integration`, which depends on `make install` and
@@ -806,9 +807,13 @@ doing the same regeneration in parallel with the one job whose entire purpose is
 to check it, so CI calls the `*-only` variants instead. `go vet` is not lost:
 golangci-lint runs the `govet` linter.
 
-**`bin/` is cached.** `controller-gen`, `kustomize` and the envtest control-plane
-binaries are `go install`ed, and the Go module cache does not cover installed
-binaries — without this they were re-downloaded on every job of every run.
+**`bin/` is cached, with a per-job key.** `controller-gen`, `kustomize` and the
+envtest control-plane binaries are `go install`ed, and the Go module cache does
+not cover installed binaries — without this they were re-downloaded on every job
+of every run. The key includes `github.job` because each job populates `bin/`
+with a different subset and `actions/cache` does not save on a hit: under one
+shared key the first job to miss froze its partial `bin/` for every other job,
+which then kept downloading what it was missing.
 
 ---
 

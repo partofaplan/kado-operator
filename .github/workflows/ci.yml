@@ -57,11 +57,18 @@ jobs:
       # controller-gen, kustomize and the envtest control-plane binaries are
       # `go install`ed into bin/, which setup-go's module cache does not cover.
       # Without this they were re-downloaded on every job of every run.
+      #
+      # The key is per-job on purpose. Each job populates bin/ with a different
+      # subset — `generated` installs only controller-gen, `test` adds
+      # setup-envtest and the control-plane binaries, `integration` adds
+      # kustomize — and actions/cache does not save on a hit. With one shared
+      # key the first job to miss froze its partial bin/ for everyone, and the
+      # jobs needing more kept downloading it on every run.
       - name: Cache tool binaries
         uses: actions/cache@v4
         with:
           path: bin
-          key: kado-bin-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod') }}
+          key: kado-bin-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Makefile', 'go.mod') }}
 
       # A stale zz_generated.deepcopy.go or CRD manifest means the cluster gets
       # a schema that does not match the Go types, so fail loudly here rather
@@ -94,11 +101,18 @@ jobs:
       # controller-gen, kustomize and the envtest control-plane binaries are
       # `go install`ed into bin/, which setup-go's module cache does not cover.
       # Without this they were re-downloaded on every job of every run.
+      #
+      # The key is per-job on purpose. Each job populates bin/ with a different
+      # subset — `generated` installs only controller-gen, `test` adds
+      # setup-envtest and the control-plane binaries, `integration` adds
+      # kustomize — and actions/cache does not save on a hit. With one shared
+      # key the first job to miss froze its partial bin/ for everyone, and the
+      # jobs needing more kept downloading it on every run.
       - name: Cache tool binaries
         uses: actions/cache@v4
         with:
           path: bin
-          key: kado-bin-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod') }}
+          key: kado-bin-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Makefile', 'go.mod') }}
 
       # test-only rather than test: both provision the envtest control-plane
       # binaries and set KUBEBUILDER_ASSETS (a bare 'go test ./...' would fail
@@ -158,11 +172,18 @@ jobs:
       # controller-gen, kustomize and the envtest control-plane binaries are
       # `go install`ed into bin/, which setup-go's module cache does not cover.
       # Without this they were re-downloaded on every job of every run.
+      #
+      # The key is per-job on purpose. Each job populates bin/ with a different
+      # subset — `generated` installs only controller-gen, `test` adds
+      # setup-envtest and the control-plane binaries, `integration` adds
+      # kustomize — and actions/cache does not save on a hit. With one shared
+      # key the first job to miss froze its partial bin/ for everyone, and the
+      # jobs needing more kept downloading it on every run.
       - name: Cache tool binaries
         uses: actions/cache@v4
         with:
           path: bin
-          key: kado-bin-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod') }}
+          key: kado-bin-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Makefile', 'go.mod') }}
 
       # --- Cluster provisioning: the ONLY provider-specific step. ---
       # Swap this for Kind, minikube, or a kubeconfig secret pointing at a
@@ -276,9 +297,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # QEMU registers the binfmt handlers buildx needs to probe foreign
-      # platforms. The build still cross-compiles natively, because the
-      # Dockerfile pins its builder stage to $BUILDPLATFORM.
+      # Belt and braces. The Dockerfile pins its builder stage to $BUILDPLATFORM
+      # and the runtime stage only COPYs a binary, so no foreign-arch
+      # instruction ever executes — the `image` job builds both platforms
+      # without QEMU. Kept here because this job pushes release artifacts and
+      # the cost is a few seconds.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -316,7 +339,12 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=publish
+          # image-check first: the `image` job built these exact layers minutes
+          # earlier in this same run, while scope=publish was last written by
+          # the previous release against different source.
+          cache-from: |
+            type=gha,scope=image-check
+            type=gha,scope=publish
           cache-to: type=gha,mode=max,scope=publish
 
       - name: Summarise published image
@@ -355,11 +383,18 @@ jobs:
       # controller-gen, kustomize and the envtest control-plane binaries are
       # `go install`ed into bin/, which setup-go's module cache does not cover.
       # Without this they were re-downloaded on every job of every run.
+      #
+      # The key is per-job on purpose. Each job populates bin/ with a different
+      # subset — `generated` installs only controller-gen, `test` adds
+      # setup-envtest and the control-plane binaries, `integration` adds
+      # kustomize — and actions/cache does not save on a hit. With one shared
+      # key the first job to miss froze its partial bin/ for everyone, and the
+      # jobs needing more kept downloading it on every run.
       - name: Cache tool binaries
         uses: actions/cache@v4
         with:
           path: bin
-          key: kado-bin-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod') }}
+          key: kado-bin-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Makefile', 'go.mod') }}
 
       - name: Package and push Helm chart
         env:
