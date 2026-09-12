@@ -52,10 +52,12 @@ That is a deliberate trade. A change that breaks the reconciler now merges
 before anything catches it, and the two post-merge failures differ:
 
 - **`integration` fails** — `version` depends on it, so no version is cut and
-  no image is published. `develop` carries a bad commit and no release.
+  no image is published. `develop` carries a bad commit and nothing shipped.
 - **`verify-picard` fails** — it runs *after* `publish`, so the version was
-  already cut, the image pushed and `latest` moved. The release exists and is
-  bad, and `picard` is left on the broken revision.
+  already cut, the image pushed and `latest` moved. A bad build is on Docker
+  Hub, and `picard` is left on the broken revision. No *release* is involved
+  either way: releases are cut deliberately, and a release would simply not be
+  cut from a bad commit.
 
 Either way the fix goes forward through a normal loop, or the commit is
 reverted.
@@ -107,10 +109,11 @@ gh workflow run release.yml -f dry_run=false   # publish for real
 and prints the release notes it would publish, without tagging, pushing or
 releasing anything.
 
-The release publishes the multi-arch image, pushes the Helm chart to the OCI
-registry, and creates a GitHub release with `install.yaml`, the chart tarball,
-the CRD on its own and a sample environment attached — everything a user needs
-to install into a cluster of their own. Notes are generated from the pull
+The release publishes the multi-arch image and creates a GitHub release with
+`install.yaml`, the chart tarball, the CRD on its own and a sample environment
+attached — everything a user needs to install into a cluster of their own.
+There is no chart registry: `helm install` takes the attached chart's URL
+directly. Notes are generated from the pull
 requests merged since the previous **release** tag, not the previous tag, since
 every merge cuts one.
 
@@ -326,7 +329,7 @@ both; `make run` will not catch the difference because it uses your kubeconfig.
 
 | Workflow | Trigger | Does |
 | --- | --- | --- |
-| `ci.yml` | pull requests into `develop`/`main`, and pushes to those two branches | **On a pull request:** lint, unit + envtest, generated-code check and a Dockerfile build (`linux/arm64` only — the cross-compiled target, since `Unit & envtest` already compiles natively on the same runner) — nothing that touches a cluster. **On a push to `develop`/`main`:** additionally the integration suite on an ephemeral cluster, then assign the version, tag and publish the image; on `develop` also upgrade `picard` and validate it; on `main` publish the release |
+| `ci.yml` | pull requests into `develop`/`main`, and pushes to those two branches | **On a pull request:** lint, unit + envtest, generated-code check and a Dockerfile build (`linux/arm64` only — the cross-compiled target, since `Unit & envtest` already compiles natively on the same runner) — nothing that touches a cluster. **On a push to `develop`/`main`:** additionally the integration suite on an ephemeral cluster, then assign the version, tag and publish the image; on `develop` also upgrade `picard` and validate it. No release is published on any push — that is `release.yml`, dispatched deliberately |
 
 Feature and hotfix branches are covered by the pull request trigger, which
 tests the merge result rather than the branch tip. They are deliberately not in

@@ -104,10 +104,13 @@ catches it. Two different things can then fail, and only one of them is
 contained:
 
 - **`integration` fails.** `version` is gated on it, so no version is cut and
-  no image is published. `develop` carries a bad commit and no release.
+  no image is published. `develop` carries a bad commit and nothing shipped.
 - **`verify-picard` fails.** This runs *after* `publish`, so by then the
-  version **was** cut, the image **was** pushed, and `latest` **was** moved.
-  The release exists and is bad. `picard` is also left on the broken revision.
+  version **was** cut, the image **was** pushed, and `latest` **was** moved. A
+  bad build is on Docker Hub, and `picard` is left on the broken revision.
+
+No *release* is involved in either case. Releases are cut deliberately, and one
+would simply not be cut from a bad commit.
 
 Either way the fix goes forward through a normal loop, and reverting is always
 available and often faster. Do not read the first bullet as covering both.
@@ -406,7 +409,7 @@ cluster of their own:
 | Artifact | What it is |
 | --- | --- |
 | `install.yaml` | CRD, RBAC and the Deployment in one manifest, for `kubectl apply` |
-| `kado-operator-<version>.tgz` | The Helm chart, also pushed to the OCI registry |
+| `kado-operator-<version>.tgz` | The Helm chart. `helm install` takes its URL directly, so there is no chart registry |
 | `crd.yaml` | The `DevEnvironment` CRD on its own |
 | `devenvironment-sample.yaml` | A sample environment to apply |
 | the image | version-pinned and by digest, both named in the notes |
@@ -678,19 +681,21 @@ One workflow owns the whole line. It validates every merge request, and on
 `develop` and `main` it additionally assigns the next version, tags the commit,
 and publishes. Jobs: `lint`, `generated`, `test` and `image` on everything;
 then, on a push only, `integration` → `version` → `publish`, followed by
-`verify-picard` on `develop` and `release` on `main`.
+`verify-picard` on `develop`. There is no release job: releases are
+`release.yml`, dispatched deliberately.
 
 ### Decisions that look wrong until you know why
 
 **Integration is a job in `ci.yml`, not a workflow of its own.** A workflow
 cannot declare a `needs` dependency on a *different* workflow. With integration
-tests in their own file, `version` could not wait for them, so a merge to `main`
-could tag, publish and release while integration tests were still running or
-already red. The Definition of Done requires them to pass, so they sit upstream
-of `version` in the same run.
+tests in their own file, `version` could not wait for them, so a merge could
+tag and publish while integration tests were still running or already red. The
+Definition of Done requires them to pass, so they sit upstream of `version` in
+the same run.
 
-**There is no `release.yml` triggered by `push: tags: v*`,** for the reason given
-under [Versioning](#two-consequences-worth-knowing).
+**`release.yml` is `workflow_dispatch`, not `push: tags: v*`,** for the reason
+given under [Versioning](#two-consequences-worth-knowing) — and because a
+release is a decision rather than a reaction.
 
 **The `integration` job is `push`-only, and `verify-picard` exists at all.**
 Together these implement
@@ -837,14 +842,23 @@ time, per [Versioning](#two-consequences-worth-knowing).
 - Service type `ClusterIP` by default; anything else is opt-in.
 - Guard optional CRD-dependent resources (e.g. `ServiceMonitor`) behind a flag.
 
-### Install from Docker Hub (OCI)
+### Install the published chart
+
+The chart is attached to each GitHub release, and Helm installs straight from a
+URL — so there is no chart registry to publish to, authenticate against or keep
+in step with the image:
 
 ```bash
-helm install kado-operator oci://registry-1.docker.io/partofaplan/kado-operator \
-  --version 0.1.0 \
-  --namespace kado-operator-system \
-  --create-namespace
+helm install kado-operator \
+  https://github.com/partofaplan/kado-operator/releases/latest/download/kado-operator-chart.tgz \
+  --namespace kado-operator-system --create-namespace
 ```
+
+Publishing the chart to an OCI registry was considered and dropped. On Docker
+Hub `helm push` would have landed it at `partofaplan/kado-operator:<version>` —
+the same repository and tag as the image, replacing it — and the alternatives
+were a second registry or renaming the chart, which would rename every resource
+it creates. The release asset does the same job with none of that.
 
 ### Install from a local checkout
 

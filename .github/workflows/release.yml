@@ -28,7 +28,6 @@ env:
   IMAGE: docker.io/partofaplan/kado-operator
   # Not a secret: this namespace is public and already appears in IMAGE.
   DOCKERHUB_USER: partofaplan
-  CHART_REPO: oci://registry-1.docker.io/partofaplan
 
 jobs:
   release:
@@ -44,6 +43,35 @@ jobs:
             echo "::error::releases are cut from main only; got ${{ github.ref_name }}"
             exit 1
           fi
+
+      # `gh workflow run -f dry_run=false` sends the STRING "false" over the
+      # REST API, not a boolean — `type: boolean` only makes it a real boolean
+      # when dispatched from the web UI. In GitHub expressions ANY non-empty
+      # string is truthy, so `!inputs.dry_run` evaluates to false for "false":
+      # every publish step would skip and a real release would quietly do
+      # nothing while reporting success.
+      #
+      # Normalised once here, and everything gates on this output. It fails
+      # SAFE: only an explicit false publishes, so an empty, misspelled or
+      # unexpected value is treated as a dry run rather than shipping.
+      - name: Decide whether to publish
+        id: mode
+        # Through env, not interpolated into the script. The fail-safe `case`
+        # below exists precisely because GitHub does not guarantee this value is
+        # a boolean, and a value that can be unexpected can also be hostile —
+        # rendering it into `run:` would put it inside a job holding
+        # contents: write and DOCKERHUB_TOKEN. Dispatch is the one way into this
+        # job that does not pass review, so it gets the careful form.
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          case "$DRY_RUN" in
+            false|False|FALSE) publish=true ;;
+            *)                 publish=false ;;
+          esac
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          echo "dry_run input = '${DRY_RUN}' -> publish=${publish}"
 
       - uses: actions/checkout@v4
         with:
@@ -84,7 +112,7 @@ jobs:
             echo "| --- | --- |"
             echo "| notes measured from | \`${prev:-the start of the repository}\` |"
             echo "| commit | \`${GITHUB_SHA:0:7}\` |"
-            echo "| dry run | \`${{ inputs.dry_run }}\` |"
+            echo "| dry run | \`${{ inputs.dry_run }}\` (publish=${{ steps.mode.outputs.publish }}) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Chart version and appVersion are both the release version. The scheme
@@ -101,6 +129,14 @@ jobs:
           helm package charts/kado-operator \
             --version "$V" --app-version "$V" --destination dist/
           make build-installer IMG="${IMAGE}:${V}"
+          # A stable-named copy alongside the versioned one. A chart filename
+          # carries its version by convention, which makes
+          # releases/latest/download/<name> — the URL that never goes stale —
+          # unspellable for it. install.yaml already has that property for
+          # free, so without this copy the two documented install paths would
+          # disagree: one always current, one pinned to whatever release the
+          # docs happened to be written against.
+          cp "dist/kado-operator-${V}.tgz" dist/kado-operator-chart.tgz
           cp config/crd/bases/devenv.aviture.dev_devenvironments.yaml dist/crd.yaml
           cp config/samples/devenv_v1alpha1_devenvironment.yaml dist/devenvironment-sample.yaml
           ls -la dist/
@@ -112,7 +148,7 @@ jobs:
       # property literally named `image:` — so grepping the full output and
       # taking the first match picked up the schema line and this gate failed
       # 100% of the time, on both Helm 3 and 4.
-      - name: Verify the packaged chart resolves the published image tag
+      - name: Verify both artifacts reference the published image tag
         env:
           V: ${{ steps.ver.outputs.version }}
         run: |
@@ -121,8 +157,15 @@ jobs:
             --namespace kado-operator-system \
             --show-only templates/deployment.yaml | grep -E '^[[:space:]]+image: ')
           echo "chart renders:${rendered}"
-          echo "$rendered" | grep -q "${IMAGE}:${V}" \
+          echo "$rendered" | grep -qF "${IMAGE}:${V}" \
             || { echo "::error::packaged chart does not reference ${IMAGE}:${V}"; exit 1; }
+
+          # install.yaml is the other artifact users apply, generated separately
+          # by `make build-installer`. It was correct by construction — so was
+          # the chart's CRD copy, until helm-crds drift made that worth checking.
+          grep -qF "${IMAGE}:${V}" dist/install.yaml \
+            || { echo "::error::install.yaml does not reference ${IMAGE}:${V}"; exit 1; }
+          echo "install.yaml references ${IMAGE}:${V}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -131,7 +174,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        if: ${{ !inputs.dry_run }}
+        if: steps.mode.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKERHUB_USER }}
@@ -144,7 +187,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ !inputs.dry_run }}
+          push: ${{ steps.mode.outputs.publish == 'true' }}
           platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
@@ -178,18 +221,14 @@ jobs:
             echo
             echo "Everything below is attached to this release. Pick one path."
             echo
-            echo "### Helm (any cluster)"
+            echo "### Helm"
+            echo
+            echo "Helm installs straight from a URL, so the chart attached to"
+            echo "this release needs no registry and no download step:"
             echo
             echo '```bash'
-            echo "helm install kado-operator ${CHART_REPO}/kado-operator \\"
-            echo "  --version ${V} \\"
-            echo "  --namespace kado-operator-system --create-namespace"
-            echo '```'
-            echo
-            echo "Or from the attached chart, without a registry:"
-            echo
-            echo '```bash'
-            echo "helm install kado-operator ./kado-operator-${V}.tgz \\"
+            echo "helm install kado-operator \\"
+            echo "  https://github.com/${GITHUB_REPOSITORY}/releases/download/v${V}/kado-operator-${V}.tgz \\"
             echo "  --namespace kado-operator-system --create-namespace"
             echo '```'
             echo
@@ -220,7 +259,8 @@ jobs:
             echo "| File | What it is |"
             echo "| --- | --- |"
             echo "| \`install.yaml\` | CRD, RBAC and the operator Deployment in one manifest |"
-            echo "| \`kado-operator-${V}.tgz\` | The Helm chart |"
+            echo "| \`kado-operator-${V}.tgz\` | The Helm chart, version-pinned |"
+            echo "| \`kado-operator-chart.tgz\` | The same chart under a stable name, so \`releases/latest/download/kado-operator-chart.tgz\` always resolves to the newest |"
             echo "| \`crd.yaml\` | The \`DevEnvironment\` CRD on its own |"
             echo "| \`devenvironment-sample.yaml\` | A sample environment to apply |"
             echo
@@ -231,7 +271,7 @@ jobs:
           echo "--- final notes ---"; cat dist/RELEASE_NOTES.md
 
       - name: Dry run summary
-        if: ${{ inputs.dry_run }}
+        if: steps.mode.outputs.publish != 'true'
         run: |
           {
             echo "### Dry run — nothing was tagged, pushed or published"
@@ -240,16 +280,6 @@ jobs:
             sed -n '1,80p' dist/RELEASE_NOTES.md
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Push the chart to the OCI registry
-        if: ${{ !inputs.dry_run }}
-        env:
-          V: ${{ steps.ver.outputs.version }}
-        run: |
-          set -euo pipefail
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io \
-            --username "${DOCKERHUB_USER}" --password-stdin
-          helm push "dist/kado-operator-${V}.tgz" "${CHART_REPO}"
 
       # LAST, and it creates the tag itself rather than a separate `git push`
       # step earlier.
@@ -269,7 +299,7 @@ jobs:
       # trade: repeating a push beats burning a release number, and it only
       # happens when a release has already failed.
       - name: Create the GitHub release and its tag
-        if: ${{ !inputs.dry_run }}
+        if: steps.mode.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
@@ -279,5 +309,6 @@ jobs:
           files: |
             dist/install.yaml
             dist/kado-operator-${{ steps.ver.outputs.version }}.tgz
+            dist/kado-operator-chart.tgz
             dist/crd.yaml
             dist/devenvironment-sample.yaml

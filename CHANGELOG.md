@@ -10,8 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 - `.github/workflows/release.yml`: a `workflow_dispatch` release, from `main`
   only, that cuts the next RELEASE version and publishes the package — the
-  multi-arch image, the Helm chart (attached and pushed to the OCI registry),
-  `install.yaml`, the CRD on its own, and a sample environment. Release notes
+  multi-arch image, the Helm chart, `install.yaml`, the CRD on its own, and a
+  sample environment. Release notes
   are generated from the pull requests merged since the **previous release
   tag**, not the previous tag, since every merge cuts one. `dry_run` defaults
   to true and builds everything without tagging or publishing. The version is
@@ -29,6 +29,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The Helm chart is distributed as a GitHub release asset rather than pushed to
+  an OCI registry. `helm install` accepts the attached chart's URL directly, so
+  a registry added authentication and a second place to keep in step with the
+  image for no gain. Publishing it to Docker Hub was not an option either: the
+  chart would have landed at the image's own repository and tag and replaced it.
 - Versions are now `RELEASE.MAJOR.MINOR`. Merging into `develop` moves MINOR,
   merging into `main` moves MAJOR, and cutting a release moves RELEASE. The
   first two stay automatic; the third is a deliberate `workflow_dispatch`,
