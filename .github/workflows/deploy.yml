@@ -1,0 +1,198 @@
+name: Deploy
+
+# Manual only, and never on pull_request.
+#
+# This repository is PUBLIC and this job runs on a self-hosted runner — a
+# physical Mac. A `pull_request` trigger would let anyone who opens a PR from a
+# fork execute arbitrary code on that machine. Keep this workflow dispatch-only
+# unless you deliberately decide otherwise.
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (e.g. develop, 0.2, sha-72a92f7)'
+        required: true
+        default: 'develop'
+        type: string
+      namespace:
+        description: 'Namespace to install the operator into'
+        required: true
+        default: 'kado-operator-system'
+        type: string
+      kube_context:
+        description: 'kubectl context to deploy to'
+        required: true
+        default: 'k3d-picard'
+        type: string
+      dry_run:
+        description: 'Render and validate without applying anything'
+        required: false
+        default: false
+        type: boolean
+
+# One deploy at a time per target, and never cancel one midway: a half-applied
+# release is worse than a queued one.
+concurrency:
+  group: deploy-${{ inputs.kube_context }}-${{ inputs.namespace }}
+  cancel-in-progress: false
+
+env:
+  RELEASE: kado-operator
+  IMAGE: docker.io/partofaplan/kado-operator
+
+jobs:
+  deploy:
+    name: Helm deploy to ${{ inputs.kube_context }}
+    runs-on: [ self-hosted, macOS, ARM64 ]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # A self-hosted runner does not get a login shell's PATH. On this machine
+      # kubectl, helm and docker live in ~/.rd/bin (Rancher Desktop), which a
+      # non-login zsh does not include — without this, every later step fails
+      # with "command not found".
+      - name: Put cluster tooling on PATH
+        run: |
+          set -euo pipefail
+          for d in "$HOME/.rd/bin" /opt/homebrew/bin /usr/local/bin; do
+            [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH"
+          done
+
+      - name: Verify tooling
+        run: |
+          set -euo pipefail
+          for t in kubectl helm; do
+            command -v "$t" >/dev/null || { echo "::error::$t not found on PATH: $PATH"; exit 1; }
+          done
+          kubectl version --client
+          helm version --short
+
+      # Fail here with a clear message rather than 5 minutes later on a helm
+      # timeout, and confirm we are pointed at the intended cluster. This
+      # machine also has a `rancher-desktop` context; pinning --kube-context
+      # everywhere is what stops a deploy landing in the wrong place.
+      - name: Preflight
+        env:
+          CTX: ${{ inputs.kube_context }}
+          TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          if ! kubectl config get-contexts -o name | grep -qx "$CTX"; then
+            echo "::error::kube context '$CTX' not found. Available:"
+            kubectl config get-contexts -o name | sed 's/^/  /'
+            exit 1
+          fi
+
+          echo "Target cluster:"
+          kubectl --context "$CTX" cluster-info | head -2
+          kubectl --context "$CTX" get nodes -o wide
+
+          # Deploying a tag that was never published is the most common cause of
+          # a silent ImagePullBackOff. Catch it before touching the cluster.
+          if command -v docker >/dev/null && docker manifest inspect "${IMAGE}:${TAG}" >/dev/null 2>&1; then
+            echo "Image ${IMAGE}:${TAG} exists."
+          else
+            echo "::error::image ${IMAGE}:${TAG} not found on Docker Hub. Published tags are visible at https://hub.docker.com/r/partofaplan/kado-operator/tags"
+            exit 1
+          fi
+
+          # The chart installs the CRD. If one is already present but was applied
+          # by kustomize (make install, which make test-integration runs), Helm
+          # refuses to adopt it and fails with an opaque ownership error.
+          #
+          # A kustomize-applied CRD carries NO managed-by label at all, so
+          # testing only for a *different* manager misses the common case. Treat
+          # anything that is not Helm-owned by this release as a conflict.
+          CRD=devenvironments.devenv.aviture.dev
+          if kubectl --context "$CTX" get crd "$CRD" >/dev/null 2>&1; then
+            owner=$(kubectl --context "$CTX" get crd "$CRD" \
+                      -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+            rel=$(kubectl --context "$CTX" get crd "$CRD" \
+                    -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || true)
+            if [ "$owner" != "Helm" ] || [ "$rel" != "$RELEASE" ]; then
+              echo "::error::CRD $CRD exists but is not owned by the Helm release '$RELEASE' (managed-by='${owner:-<none>}', release='${rel:-<none>}'). Helm will refuse to adopt it."
+              echo "Fix: run 'make uninstall' against this cluster to drop the kustomize-applied CRD, or deploy with --set installCRDs=false."
+              echo "Note: deleting the CRD deletes every DevEnvironment with it."
+              exit 1
+            fi
+          fi
+
+      - name: Helm deploy
+        env:
+          CTX: ${{ inputs.kube_context }}
+          NS: ${{ inputs.namespace }}
+          TAG: ${{ inputs.image_tag }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          # Roll the release back if it never becomes ready, so a failed deploy
+          # leaves the previous version running rather than a broken one.
+          # Helm 4 renamed --atomic to --rollback-on-failure; pick by version so
+          # this works on either and emits no deprecation warning.
+          major=$(helm version --template='{{.Version}}' | sed 's/^v//; s/\..*//')
+          if [ "$major" -ge 4 ]; then
+            rollback_flag=--rollback-on-failure
+          else
+            rollback_flag=--atomic
+          fi
+
+          args=(
+            upgrade --install "$RELEASE" ./charts/kado-operator
+            --kube-context "$CTX"
+            --namespace "$NS" --create-namespace
+            --set image.repository="$IMAGE"
+            --set image.tag="$TAG"
+            "$rollback_flag" --timeout 5m
+          )
+          if [ "$DRY" = "true" ]; then
+            echo "Dry run — rendering only, nothing will be applied."
+            helm "${args[@]}" --dry-run
+            exit 0
+          fi
+          helm "${args[@]}"
+
+      - name: Verify rollout
+        if: ${{ inputs.dry_run == false }}
+        env:
+          CTX: ${{ inputs.kube_context }}
+          NS: ${{ inputs.namespace }}
+        run: |
+          set -euo pipefail
+          kubectl --context "$CTX" -n "$NS" rollout status "deploy/$RELEASE" --timeout=3m
+          kubectl --context "$CTX" -n "$NS" get pods -o wide
+          kubectl --context "$CTX" get crd devenvironments.devenv.aviture.dev \
+            -o custom-columns=NAME:.metadata.name,CREATED:.metadata.creationTimestamp
+
+      - name: Summarise
+        if: ${{ !cancelled() }}
+        env:
+          CTX: ${{ inputs.kube_context }}
+          NS: ${{ inputs.namespace }}
+          TAG: ${{ inputs.image_tag }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "### Deploy to \`${CTX}\`"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Release | \`${RELEASE}\` |"
+            echo "| Namespace | \`${NS}\` |"
+            echo "| Image | \`${IMAGE}:${TAG}\` |"
+            echo "| Dry run | \`${DRY}\` |"
+            echo "| Result | \`${{ job.status }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Diagnostics on failure
+        if: failure()
+        env:
+          CTX: ${{ inputs.kube_context }}
+          NS: ${{ inputs.namespace }}
+        run: |
+          kubectl --context "$CTX" -n "$NS" get pods -o wide || true
+          kubectl --context "$CTX" -n "$NS" describe pods || true
+          kubectl --context "$CTX" -n "$NS" logs "deploy/$RELEASE" --tail=100 || true
+          helm --kube-context "$CTX" -n "$NS" status "$RELEASE" || true

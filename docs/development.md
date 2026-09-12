@@ -158,6 +158,38 @@ helm upgrade --install kado-operator ./charts/kado-operator \
   --set image.tag=dev
 ```
 
+### Deploying from CI
+
+`deploy.yml` installs the chart onto a cluster using the **self-hosted runner**
+(`mac-runner`, macOS/ARM64). Run it from the Actions tab or:
+
+```bash
+gh workflow run deploy.yml \
+  -f image_tag=develop \
+  -f namespace=kado-operator-system \
+  -f kube_context=k3d-picard \
+  -f dry_run=false
+```
+
+It is **`workflow_dispatch` only, deliberately**. This repository is public and
+the runner is a physical Mac: a `pull_request` trigger would let anyone opening
+a PR from a fork execute code on that machine. Do not add one.
+
+Two things about that runner are load-bearing:
+
+- **PATH.** A self-hosted runner does not get a login shell's environment. On
+  this machine `kubectl`, `helm` and `docker` live in `~/.rd/bin` (Rancher
+  Desktop), which a non-login zsh does not include, so the workflow adds it to
+  `$GITHUB_PATH` before anything else. Without that, every step fails with
+  "command not found".
+- **Context.** The machine has both `k3d-picard` and `rancher-desktop`
+  contexts. Every `kubectl` and `helm` call passes `--kube-context` explicitly
+  so a deploy cannot land in the wrong cluster.
+
+The workflow preflights before touching the cluster: the context exists, the
+image tag is actually published, and the CRD is not already owned by something
+other than this Helm release (see below).
+
 ### CRD ownership: `make install` vs the chart
 
 Two things can install the DevEnvironment CRD, and they do not share
