@@ -177,7 +177,12 @@ it is never pushed, and the registry carries no sha tags (see
 
 ```bash
 SHA=$(git rev-parse --short HEAD)
-CTX=k3d-picard
+# The CONTEXT is `picard`; the k3d CLUSTER it points at is `k3d-picard`. They
+# are not interchangeable — `kubectl --context k3d-picard` fails with "no
+# context exists", while `make cluster-load LOCAL_CLUSTER=` wants the cluster
+# name. Confirm with `kubectl config get-contexts` if a command reports either
+# name as missing.
+CTX=picard
 
 # Gate 2 runs `make test-integration`, which depends on `make install` and
 # leaves a kustomize-applied CRD. Helm refuses to adopt it, so without this the
@@ -265,7 +270,20 @@ contract, so it is part of the verification.
 cluster:
 
 ```bash
-kubectl --context "$CTX" delete devenvironment "$ENV" --ignore-not-found
+kubectl --context "$CTX" delete devenvironment "$ENV" --ignore-not-found --timeout=180s
+
+# Order matters, and this check enforces it. The operator is the only thing
+# that removes its own finalizer, so uninstalling it while any DevEnvironment
+# still carries one strands that object permanently: the CR cannot finish
+# deleting, and the CRD deletion below then blocks forever on
+# `customresourcecleanup.apiextensions.k8s.io`. Recovering means patching the
+# finalizer off by hand. If the delete above timed out, do NOT continue —
+# reinstate the operator and let it drain, or clear the finalizer first:
+#   kubectl --context "$CTX" -n default patch devenvironment "$ENV" \
+#     --type=merge -p '{"metadata":{"finalizers":[]}}'
+remaining=$(kubectl --context "$CTX" get devenvironments -A --no-headers 2>/dev/null | wc -l | tr -d ' ')
+[ "$remaining" = "0" ] || { echo "refusing to uninstall: $remaining DevEnvironment(s) still present"; exit 1; }
+
 helm uninstall kado-operator -n kado-operator-system --kube-context "$CTX"
 # helm uninstall does NOT remove the namespace it created.
 kubectl --context "$CTX" delete ns kado-operator-system --ignore-not-found
