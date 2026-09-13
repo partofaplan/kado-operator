@@ -26,8 +26,78 @@ env:
 
 
 jobs:
+  changes:
+    name: Detect change scope
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      # Docs do not reach the image (the Dockerfile copies go.mod/sum, cmd, api
+      # and internal) or the chart, so a docs-only change cannot alter what we
+      # build. Running the suite on one only delays the merge, and letting it
+      # reach `version` burns a release number on a byte-identical image and
+      # redeploys picard for a typo.
+      #
+      # Every gated job is a *required* check on develop, so this must never
+      # fail closed: a job skipped by `if:` reports as skipped and satisfies
+      # the requirement, but a job that never runs at all leaves the check
+      # pending forever and the PR unmergeable (enforce_admins is on, so there
+      # is no override). Anything ambiguous therefore sets code=true.
+      - id: filter
+        name: Decide whether this is a docs-only change
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${EVENT}" = "pull_request" ]; then
+            base="${PR_BASE}"; head="${PR_HEAD}"
+          else
+            base="${PUSH_BEFORE}"; head="${PUSH_AFTER}"
+          fi
+
+          full() {
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "==> running the full pipeline: $1"
+            exit 0
+          }
+
+          # A first push to a branch reports an all-zero before-SHA, and a
+          # force-push can leave one we no longer hold.
+          case "${base}" in
+            ""|0000000000000000000000000000000000000000) full "no usable base ref" ;;
+          esac
+          git cat-file -e "${base}^{commit}" 2>/dev/null || full "base ${base} not in this clone"
+          git cat-file -e "${head}^{commit}" 2>/dev/null || full "head ${head} not in this clone"
+
+          files="$(git diff --name-only "${base}" "${head}")"
+          [ -n "${files}" ] || full "empty diff ${base}..${head}"
+
+          echo "changed files:"
+          echo "${files}" | sed 's/^/  /'
+
+          while IFS= read -r f; do
+            case "${f}" in
+              docs/*|*.md|LICENSE) ;;
+              *) full "${f} is not documentation" ;;
+            esac
+          done <<< "${files}"
+
+          echo "code=false" >> "$GITHUB_OUTPUT"
+          echo "==> documentation only; skipping build, test and release"
+
   lint:
     name: Lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -51,6 +121,8 @@ jobs:
 
   generated:
     name: Generated code is up to date
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -95,6 +167,8 @@ jobs:
 
   test:
     name: Unit & envtest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -148,6 +222,8 @@ jobs:
   # is tunable is how many platforms get compiled.
   image:
     name: Image builds
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -199,7 +275,8 @@ jobs:
     # etcd binary, not a cluster. The trade is deliberate: a broken reconciler
     # now reaches develop before anything catches it, so `version` is gated on
     # this job and no version is cut until it passes.
-    if: github.event_name == 'push'
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
