@@ -158,6 +158,10 @@ kubectl get devenvironments -w
 If you need a throwaway local cluster, `make cluster-up` creates one
 (`LOCAL_PROVIDER=k3d|kind|minikube`, default `k3d`).
 
+[`examples/`](examples/) has ready-to-apply environments for common setups —
+Postgres or MySQL with a database UI, MongoDB, RabbitMQ, Prometheus and
+Grafana, and a mail sandbox. Copy one and change the names and credentials.
+
 ## Build & release
 
 ```bash

@@ -18,6 +18,9 @@ package controller
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -28,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -199,6 +203,44 @@ var _ = Describe("DevEnvironment", func() {
 			},
 		}}
 		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+	})
+
+	// examples/ ships manifests people copy. A field renamed or tightened in
+	// the API would leave them silently invalid — discovered by whoever applied
+	// one, not by us. Server-side dry-run validates each against the real CRD
+	// schema without creating anything, so this stays cheap and needs no
+	// cleanup.
+	It("accepts every manifest in examples/", func() {
+		dir := filepath.Join("..", "..", "examples")
+		entries, err := os.ReadDir(dir)
+		Expect(err).NotTo(HaveOccurred(), "examples/ should exist")
+
+		checked := 0
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			Expect(err).NotTo(HaveOccurred(), e.Name())
+
+			obj := &unstructured.Unstructured{}
+			Expect(yaml.Unmarshal(raw, &obj.Object)).To(Succeed(), e.Name())
+
+			// Unique name per run: dry-run still rejects a duplicate, and the
+			// point is the schema, not the name in the file.
+			obj.SetName(uniqueName())
+			obj.SetNamespace("default")
+			// namespaceName is immutable and defaults to the resource name;
+			// leaving the file's value would collide across runs.
+			unstructured.RemoveNestedField(obj.Object, "spec", "namespaceName")
+
+			Expect(k8sClient.Create(ctx, obj, client.DryRunAll)).
+				To(Succeed(), "examples/%s is not valid against the CRD", e.Name())
+			checked++
+		}
+		// Guards against the loop silently checking nothing if the directory
+		// moves or the suffix changes.
+		Expect(checked).To(BeNumerically(">=", 5), "expected to validate the example manifests")
 	})
 
 	It("provisions a namespace, deployment and service", func() {

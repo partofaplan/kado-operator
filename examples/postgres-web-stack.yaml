@@ -1,0 +1,71 @@
+# Postgres, Redis and a database UI — the backing services a typical web
+# application needs in development.
+#
+#   kubectl apply -f examples/postgres-web-stack.yaml
+#
+# Your application does not run here. Point it at the services from outside the
+# cluster with a port-forward, or run it inside and reach them by name:
+#
+#   postgres.<namespace>.svc.cluster.local:5432
+#   redis.<namespace>.svc.cluster.local:6379
+#
+#   kubectl -n web-stack port-forward svc/adminer 8080:8080   # then localhost:8080
+apiVersion: devenv.aviture.dev/v1alpha1
+kind: DevEnvironment
+metadata:
+  name: web-stack
+  namespace: default
+spec:
+  owner: web-team
+
+  # One shared volume for the environment. Exactly one service should mount it:
+  # it is a single ReadWriteOnce claim, so two databases writing to it would
+  # fight over the same directory.
+  storage:
+    size: 1Gi
+
+  # Injected into every service via envFrom, so your application picks these up
+  # too if you run it in this namespace.
+  config:
+    LOG_LEVEL: debug
+    ENVIRONMENT: development
+
+  services:
+    - name: postgres
+      image: postgres:16-alpine
+      port: 5432
+      env:
+        POSTGRES_USER: dev
+        POSTGRES_PASSWORD: dev
+        POSTGRES_DB: appdb
+        # PGDATA must be a SUBDIRECTORY of the mount, not the mount itself:
+        # initdb refuses to run in a directory that already contains lost+found.
+        PGDATA: /var/lib/postgresql/data/pgdata
+      mountPath: /var/lib/postgresql/data
+      # Empty handler: a TCP check against this service's own port. Without it
+      # postgres counts as ready the moment the process starts, before it
+      # accepts connections.
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { cpu: 500m, memory: 512Mi }
+
+    - name: redis
+      image: redis:7-alpine
+      port: 6379
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 200m, memory: 256Mi }
+
+    # Browse the database without installing a client. Log in with server
+    # `postgres`, user `dev`, password `dev`.
+    - name: adminer
+      image: adminer:4
+      port: 8080
+      env:
+        ADMINER_DEFAULT_SERVER: postgres
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 200m, memory: 128Mi }

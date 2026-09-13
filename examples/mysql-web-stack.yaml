@@ -1,0 +1,49 @@
+# The same shape as postgres-web-stack, on MySQL — for a project whose
+# production database is MySQL rather than Postgres.
+#
+#   kubectl apply -f examples/mysql-web-stack.yaml
+#   mysql.<namespace>.svc.cluster.local:3306
+#
+#   kubectl -n mysql-stack port-forward svc/adminer 8080:8080   # then localhost:8080
+apiVersion: devenv.aviture.dev/v1alpha1
+kind: DevEnvironment
+metadata:
+  name: mysql-stack
+  namespace: default
+spec:
+  owner: web-team
+
+  storage:
+    size: 1Gi
+
+  config:
+    LOG_LEVEL: debug
+    ENVIRONMENT: development
+
+  services:
+    - name: mysql
+      image: mysql:8
+      port: 3306
+      env:
+        MYSQL_ROOT_PASSWORD: dev
+        MYSQL_DATABASE: appdb
+        MYSQL_USER: dev
+        MYSQL_PASSWORD: dev
+      mountPath: /var/lib/mysql
+      # MySQL is slower to initialise than Postgres on first start — it builds
+      # the system tables before it listens. The probe is what keeps the
+      # environment out of Ready until that finishes.
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 200m, memory: 512Mi }
+        limits: { cpu: 1, memory: 1Gi }
+
+    - name: adminer
+      image: adminer:4
+      port: 8080
+      env:
+        ADMINER_DEFAULT_SERVER: mysql
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 200m, memory: 128Mi }
