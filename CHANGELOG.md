@@ -64,7 +64,6 @@ All notable changes to this project are documented here. The format follows
   `cluster-load`, `test-integration-local`) selectable with
   `LOCAL_PROVIDER=k3d|kind|minikube`.
 
-[Unreleased]: https://github.com/partofaplan/kado-operator/compare/main...develop
 
 ### Changed
 
@@ -146,3 +145,5 @@ All notable changes to this project are documented here. The format follows
 - `.claude/SKILL.MD` rewritten so each rule and rationale is stated exactly
   once, and so it links to `Makefile` and `.github/workflows/ci.yml` rather
   than embedding copies that had already drifted from them.
+
+[Unreleased]: https://github.com/partofaplan/kado-operator/compare/main...develop

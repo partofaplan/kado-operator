@@ -440,11 +440,11 @@ func imageRef(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSp
 // hasRegistry reports whether an image reference already names a registry.
 //
 // This is Docker's own rule, and following it rather than inventing one is
-// what makes the feature predictable: the first path segment is a host if it
-// contains a dot or a colon, or is exactly "localhost". Everything else is a
-// Docker Hub repository — which is why `redis:7-alpine` is a repository named
-// redis rather than a registry named redis, and why `myteam/api` is a Docker
-// Hub org rather than a host.
+// what makes the feature predictable. The first path segment is a host if it
+// contains a dot or a colon, is exactly "localhost", or contains an uppercase
+// letter. Everything else is a Docker Hub repository — which is why
+// `redis:7-alpine` is a repository named redis rather than a registry named
+// redis, and why `myteam/api` is a Docker Hub org rather than a host.
 //
 // It also removes the need for a per-service opt-out: a service that pins
 // `quay.io/team/api:1` keeps it even when the environment sets a registry,
@@ -454,11 +454,10 @@ func hasRegistry(image string) bool {
 	if !found {
 		return false
 	}
-	// The uppercase clause is Docker's fourth case and is easy to miss: a path
-	// component may not contain uppercase, so a dotless uppercase first segment
-	// cannot be a repository and must be a host. Without it, `MYHOST/app:1`
-	// would be prefixed into `<registry>/MYHOST/app:1` — an invalid reference
-	// that fails at pull time as InvalidImageName rather than being left alone.
+	// The uppercase clause is the easiest of the four to miss: a path component
+	// may not contain uppercase, so a dotless uppercase segment cannot be a
+	// repository. Without it `MYHOST/app:1` would become
+	// `<registry>/MYHOST/app:1`, an invalid reference that fails at pull time.
 	return first == "localhost" ||
 		strings.ContainsAny(first, ".:") ||
 		strings.ToLower(first) != first

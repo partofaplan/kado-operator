@@ -925,9 +925,10 @@ func TestImageRef(t *testing.T) {
 		{"an image with no tag at all is still prefixed",
 			"ghcr.io/myorg", "redis", "", "ghcr.io/myorg/redis"},
 
-		// An explicit empty string is how a templating tool spells "unset".
-		{"an explicit empty service registry inherits the environment's",
-			"ghcr.io/myorg", "redis:7-alpine", "", "ghcr.io/myorg/redis:7-alpine"},
+		// An explicit empty registry is NOT covered here: Go cannot distinguish
+		// an unset string from an empty one, so such a case would be a copy of
+		// the inherit case above and could only fail when it does. It is a CRD
+		// validation question, covered by the unstructured envtest spec.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, imageRef(env(tc.envReg), svc(tc.image, tc.reg)))

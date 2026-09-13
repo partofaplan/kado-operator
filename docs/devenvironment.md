@@ -201,12 +201,12 @@ spec:
 
 The test for "already names a registry" is Docker's own, so it behaves the way
 every other tool does: the first path segment is a host if it contains a dot or
-a colon, or is exactly `localhost`. Two consequences worth knowing:
+a colon, is exactly `localhost`, or contains an uppercase letter — that last
+one because a repository path may not contain uppercase, so `MYHOST/app:1` can
+only be a host. Two consequences worth knowing:
 
 - `bitnami/redis:7` is a Docker Hub **organisation**, not a host, so it does get
   prefixed — `ghcr.io/myorg/bitnami/redis:7`.
-- A dotless but uppercase first segment *is* a host, because a repository path
-  may not contain uppercase. `MYHOST/app:1` is left alone.
 - Rewriting is prefix-only. There is no way to redirect `quay.io/team/api` to a
   mirror through this field, because only you know how your mirror lays those
   images out. Configure a registry mirror on the nodes for that.
