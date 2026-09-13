@@ -294,8 +294,36 @@ func (r *DevEnvironmentReconciler) reconcileSecrets(ctx context.Context, env *de
 			)
 		}
 
+		// Secret.type is immutable, so an existing copy whose type no longer
+		// matches the source can never be updated into agreement — every
+		// reconcile from then on fails with "field is immutable" and the
+		// environment stays Failed forever. Worse, the error names a Secret in
+		// the environment namespace that the user never created, so the obvious
+		// fixes (editing or recreating the *source*) all appear to do nothing.
+		// Reachable whenever a Secret is repurposed — notably when one named in
+		// imagePullSecrets is recreated as dockerconfigjson after being
+		// rejected for its type (#48).
+		replaced, err := r.replaceOnTypeChange(ctx, env, name, ns, src.Type)
+		if err != nil {
+			return err
+		}
+
+		if replaced {
+			// Create, not CreateOrUpdate: the latter reads through the
+			// manager's cache, which still holds the Secret just deleted, so it
+			// would take the Update branch and fail NotFound.
+			fresh := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+			fresh.Labels = r.labels(env, "")
+			fresh.Type = src.Type
+			fresh.Data = maps.Clone(src.Data)
+			if err := r.Create(ctx, fresh); err != nil {
+				return fmt.Errorf("recreating secret %q after its type changed: %w", name, err)
+			}
+			continue
+		}
+
 		dst := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
-		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dst, func() error {
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, dst, func() error {
 			dst.Labels = r.labels(env, "")
 			dst.Type = src.Type
 			dst.Data = maps.Clone(src.Data)
@@ -306,6 +334,57 @@ func (r *DevEnvironmentReconciler) reconcileSecrets(ctx context.Context, env *de
 		}
 	}
 	return nil
+}
+
+// replaceOnTypeChange deletes an already-copied Secret whose type differs from
+// the source's, so it can be recreated with the new type. Reports whether it
+// deleted anything. A no-op when there is no copy yet or its type agrees.
+func (r *DevEnvironmentReconciler) replaceOnTypeChange(
+	ctx context.Context,
+	env *devenvv1alpha1.DevEnvironment,
+	name, ns string,
+	want corev1.SecretType,
+) (bool, error) {
+	// reader(), not Get: in production Client reads through the manager's
+	// cache, and acting on a stale copy here would mean deleting a Secret that
+	// is already correct.
+	var existing corev1.Secret
+	err := r.reader().Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &existing)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading copied secret %q: %w", name, err)
+	}
+	if existing.Type == want {
+		return false, nil
+	}
+
+	// Only ever delete a copy this environment made. The environment namespace
+	// is somewhere developers deploy into, so a same-named Secret from
+	// cert-manager or from a person is entirely possible — and destroying one
+	// to resolve a name collision would be far worse than the wedged reconcile
+	// this exists to prevent.
+	if !r.owns(env, &existing) {
+		return false, fmt.Errorf(
+			"secret %q in namespace %q has type %q, not %q, and is not managed by this DevEnvironment; "+
+				"rename the reference or remove that secret",
+			name, ns, existing.Type, want,
+		)
+	}
+
+	// Guard on UID: between the read above and this delete another reconcile
+	// may already have replaced the copy, and deleting the correct one would
+	// undo that. Secrets carry no finalizers, so the delete completes before
+	// the caller recreates. NotFound or a failed precondition both mean someone
+	// else got there first, which is the state we wanted.
+	if err := r.Delete(ctx, &existing, client.Preconditions{UID: &existing.UID}); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("replacing secret %q after its type changed to %q: %w", name, want, err)
+	}
+	return true, nil
 }
 
 // reconcilePVC provisions the environment's shared volume. PVC specs are
