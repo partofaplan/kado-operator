@@ -146,11 +146,14 @@ gh issue create --label enhancement --title "..." --body "..."
 When a change defers something, open an issue before the reasoning is lost, and
 reference it from the merge request.
 
-Closing is not automatic: GitHub fires a closing keyword only on the **default
-branch**, which is `main`, and feature work merges into `develop`. `Closes #14`
-in a PR body records the link but leaves the issue open. Put it in a **commit
-message** and it fires when that commit reaches `main` on the next promotion;
-otherwise close it by hand.
+Closing is not automatic. A closing keyword acts on the **default branch**,
+which is `main`, and feature work merges into `develop` — so `Closes #14` in a
+PR body records the link and leaves the issue open.
+
+In a **commit message** it fires when that commit reaches `main`, whichever
+merge carried it there, so it closes at the next promotion. That relies on the
+commit surviving, which it does because PRs here are merged rather than
+squashed. Otherwise close the issue by hand.
 
 ## The local loop
 

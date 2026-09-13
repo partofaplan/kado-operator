@@ -138,12 +138,19 @@ someone had a thought, and would rot the moment one entry went stale.
 
 Issues cost nothing to open and carry the reasoning next to the item.
 
-**Closing them is not automatic here, and it is worth knowing why.** GitHub
-fires a closing keyword only when it reaches the **default branch**, which is
-`main` — and feature work merges into `develop`. So `Closes #14` in a merge
-request body records the link and leaves the issue open. Put the keyword in a
-**commit message** instead and it fires when that commit reaches `main` on the
-next promotion. Otherwise close the issue by hand when the work merges.
+**Closing them is not automatic here, and it is worth knowing why.** A closing
+keyword acts on the **default branch**, which is `main` — and feature work
+merges into `develop`. A keyword in a merge request body fires when that merge
+request is merged into the default branch, and ours are not, so `Closes #14` in
+a description records the link and leaves the issue open.
+
+A keyword in a **commit message** is different: it fires when that commit
+reaches the default branch, whichever merge carried it there. So putting it in
+the commit closes the issue at the next promotion of `develop` into `main`.
+That depends on the commit surviving — it does here because merge requests are
+merged, not squashed, and a squash would replace the commit and its message.
+
+If neither applies, close the issue by hand when the work merges.
 
 So: when a decision defers something, **open an issue before the context is
 lost**, and say in the merge request that you did. A deferral recorded only in a
