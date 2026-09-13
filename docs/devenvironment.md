@@ -38,7 +38,10 @@ spec:
 ```
 
 A fuller example lives in
-[`config/samples/devenv_v1alpha1_devenvironment.yaml`](../config/samples/devenv_v1alpha1_devenvironment.yaml).
+[`config/samples/devenv_v1alpha1_devenvironment.yaml`](../config/samples/devenv_v1alpha1_devenvironment.yaml),
+and [`examples/`](../examples/) has ready-to-apply suites for common setups —
+Postgres or MySQL with a database UI, MongoDB, RabbitMQ, Prometheus and
+Grafana, and a mail sandbox.
 
 ## What gets created
 

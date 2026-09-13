@@ -1,0 +1,45 @@
+# MongoDB with a Redis cache — for a service built on a document store rather
+# than a relational database.
+#
+#   kubectl apply -f examples/document-store.yaml
+#   mongodb.<namespace>.svc.cluster.local:27017
+#   redis.<namespace>.svc.cluster.local:6379
+apiVersion: devenv.aviture.dev/v1alpha1
+kind: DevEnvironment
+metadata:
+  name: document-store
+  namespace: default
+spec:
+  owner: platform-team
+
+  storage:
+    size: 2Gi
+
+  config:
+    LOG_LEVEL: debug
+    ENVIRONMENT: development
+
+  services:
+    - name: mongodb
+      image: mongo:7
+      port: 27017
+      env:
+        # Root credentials are only created on an EMPTY data directory. Change
+        # these before the first apply, or delete the environment and start
+        # again — editing them later has no effect.
+        MONGO_INITDB_ROOT_USERNAME: dev
+        MONGO_INITDB_ROOT_PASSWORD: dev
+        MONGO_INITDB_DATABASE: appdb
+      mountPath: /data/db
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 200m, memory: 512Mi }
+        limits: { cpu: 1, memory: 1Gi }
+
+    - name: redis
+      image: redis:7-alpine
+      port: 6379
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 200m, memory: 256Mi }

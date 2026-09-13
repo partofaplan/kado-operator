@@ -1,0 +1,56 @@
+# Prometheus and Grafana — somewhere to point an application's /metrics
+# endpoint while you develop a dashboard or an alert.
+#
+#   kubectl apply -f examples/observability.yaml
+#   kubectl -n observability port-forward svc/grafana 3000:3000     # admin / dev
+#   kubectl -n observability port-forward svc/prometheus 9090:9090
+#
+# Both run on their built-in configuration. Prometheus scrapes only itself
+# until you give it a config of your own — this operator mounts no config
+# files, so add scrape targets by baking them into an image or by pointing a
+# sidecar-free Prometheus at a remote-write endpoint.
+apiVersion: devenv.aviture.dev/v1alpha1
+kind: DevEnvironment
+metadata:
+  name: observability
+  namespace: default
+spec:
+  owner: platform-team
+
+  # No storage, deliberately. Prometheus runs as `nobody` and Grafana as uid
+  # 472, and the operator sets no pod securityContext or fsGroup — so on any
+  # provisioner that presents the volume root as root:root 0755 (most CSI
+  # drivers, EBS, GCE PD) neither can write to it, and Prometheus panics at
+  # startup with "Unable to create mmap-ed active query log". It only appears
+  # to work on a cluster whose StorageClass happens to mount 0777, such as
+  # k3s local-path.
+  #
+  # Metrics here are therefore in-container and go away with the pod, which is
+  # the right trade for a dashboard you are iterating on.
+
+  config:
+    LOG_LEVEL: debug
+    ENVIRONMENT: development
+
+  services:
+    - name: prometheus
+      image: prom/prometheus:v3.1.0
+      port: 9090
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { cpu: 500m, memory: 1Gi }
+
+    - name: grafana
+      image: grafana/grafana:11.4.0
+      port: 3000
+      env:
+        GF_SECURITY_ADMIN_USER: admin
+        GF_SECURITY_ADMIN_PASSWORD: dev
+        # Off by default so the dashboard opens straight onto the UI rather
+        # than a login page. Drop this line to exercise the login flow.
+        GF_AUTH_ANONYMOUS_ENABLED: "true"
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { cpu: 500m, memory: 512Mi }
