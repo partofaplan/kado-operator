@@ -93,6 +93,7 @@ what it is allowed to delete.
 | `size` | Quantity | *required* | Requested capacity, e.g. `1Gi`. |
 | `storageClassName` | string | cluster default | StorageClass backing the claim. |
 | `accessModes` | []string | `[ReadWriteOnce]` | Access modes for the claim. |
+| `fsGroup` | int64 | — | Makes the volume group-owned by this GID so a non-root image can write to it. See [Non-root images and storage](#non-root-images-and-storage). |
 
 The claim is created once and then left alone: PVC specs are largely immutable,
 so resizing is a deliberate manual operation rather than something a spec edit
@@ -277,6 +278,51 @@ conditions.
 Kubernetes itself accepts a wrong-typed Secret here and then silently ignores
 it, so the only symptom would otherwise be an `ImagePullBackOff` that looks
 exactly like a bad password.
+
+## Non-root images and storage
+
+A container that does not run as root cannot write the shared volume unless you
+say which group owns it:
+
+```yaml
+spec:
+  storage:
+    size: 2Gi
+    fsGroup: 65534          # the GID the image runs as
+  services:
+    - name: prometheus
+      image: prom/prometheus:v3.1.0
+      port: 9090
+      mountPath: /prometheus
+```
+
+Kubernetes then chowns the volume to `root:<fsGroup>`, sets the group-write and
+setgid bits, and adds the GID to the container's supplementary groups. Verified
+behaviour, with and without the field:
+
+| | pod `securityContext` | volume |
+| --- | --- | --- |
+| `fsGroup: 65534` | `{"fsGroup":65534}` | `owner=0 group=65534 mode=2777` |
+| unset | none | `owner=0 group=0 mode=777` |
+
+Without it the volume is presented as the provisioner leaves it. That is
+`root:root 0755` on most CSI drivers, EBS and GCE PD, and a non-root process
+gets `permission denied` — Prometheus, for instance, panics at startup with
+`Unable to create mmap-ed active query log`, and the environment sits in
+`Provisioning` while the pod crash-loops.
+
+**Images that start as root and chown their own data directory do not need
+this** — `postgres`, `mysql` and `mongo` all do. Images that run as a fixed
+non-root user do: Prometheus is `nobody` (65534), Grafana is uid 472.
+
+The field applies only to services that actually mount the volume, so adding it
+does not restart anything else. `fsGroup` is a pod-level setting and the shared
+volume is meant to be mounted by one service, so it lives on `storage` rather
+than per service.
+
+**Why this is easy to miss:** a cluster whose StorageClass mounts the volume
+0777 — k3s `local-path`, which both k3d and Rancher Desktop use by default —
+works without it. The failure appears on the second cluster, not the first.
 
 ## Readiness
 

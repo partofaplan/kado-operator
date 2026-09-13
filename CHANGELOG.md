@@ -15,6 +15,12 @@ All notable changes to this project are documented here. The format follows
   kept running it while `helm upgrade` reported success. Setting
   `image.pullPolicy` explicitly still overrides, which side-loading relies on.
 
+- `spec.storage.fsGroup`: makes the shared volume group-owned by a given GID so
+  a container that does not run as root can write to it. Without it the volume
+  is presented as the provisioner leaves it — `root:root 0755` on most CSI
+  drivers, EBS and GCE PD — and a non-root image fails with "permission
+  denied". Applies only to services that mount the volume.
+
 - `spec.imagePullSecrets` and `spec.services[].imagePullSecrets`: authenticate
   to a private registry. Names docker-registry Secrets in the `DevEnvironment`'s
   own namespace, which are copied into the environment namespace alongside

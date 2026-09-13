@@ -450,6 +450,7 @@ func (r *DevEnvironmentReconciler) reconcileService(
 		deploy.Spec.Template.Spec.Containers = []corev1.Container{r.container(env, spec)}
 		deploy.Spec.Template.Spec.Volumes = r.volumes(env, spec)
 		deploy.Spec.Template.Spec.ImagePullSecrets = pullSecretRefs(env, spec)
+		deploy.Spec.Template.Spec.SecurityContext = podSecurityContext(env, spec)
 		return nil
 	})
 	if err != nil {
@@ -586,6 +587,27 @@ func readinessProbe(spec *devenvv1alpha1.ServiceSpec) *corev1.Probe {
 		}
 	}
 	return probe
+}
+
+// podSecurityContext carries spec.storage.fsGroup onto the pods that mount the
+// shared volume, which is what lets a non-root image write to it.
+//
+// Only those pods: fsGroup on a pod with no volume changes nothing, and setting
+// it everywhere would roll every service in the environment the first time
+// anyone added the field. The mount test is deliberately the same one volumes()
+// makes, so a service can never get the group without the volume or the other
+// way round.
+//
+// Returns nil rather than an empty struct when there is nothing to say, so the
+// pod template matches what the API server stores and does not churn a rollout
+// on every reconcile.
+func podSecurityContext(
+	env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec,
+) *corev1.PodSecurityContext {
+	if spec.MountPath == "" || env.Spec.Storage == nil || env.Spec.Storage.FSGroup == nil {
+		return nil
+	}
+	return &corev1.PodSecurityContext{FSGroup: env.Spec.Storage.FSGroup}
 }
 
 func (r *DevEnvironmentReconciler) volumes(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []corev1.Volume {

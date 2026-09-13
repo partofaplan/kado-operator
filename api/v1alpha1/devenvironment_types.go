@@ -65,6 +65,29 @@ type StorageSpec struct {
 	// +optional
 	// +listType=atomic
 	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
+
+	// fsGroup makes the volume group-owned by this GID, so a container that
+	// does not run as root can write to it.
+	//
+	// Without it the volume is presented as the provisioner leaves it —
+	// root:root 0755 on most CSI drivers, EBS and GCE PD — and an image
+	// running as a non-root user fails with "permission denied". Images that
+	// start as root and chown their own data directory (postgres, mysql,
+	// mongo) do not need this; ones that do not (prometheus runs as nobody,
+	// grafana as 472) do.
+	//
+	// Set it to the GID the image runs as. Kubernetes then chowns the volume
+	// to root:<fsGroup> with group write, and adds the GID to the container's
+	// supplementary groups.
+	//
+	// Applies only to services that actually mount the volume, so adding it
+	// does not restart anything else. A cluster whose StorageClass happens to
+	// mount 0777, such as k3s local-path, works without it — which is why the
+	// need for it usually surfaces only on a second cluster.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2147483647
+	FSGroup *int64 `json:"fsGroup,omitempty"`
 }
 
 // ServiceSpec describes one supporting service (database, cache, queue, ...)

@@ -52,14 +52,14 @@ looks like a bug later:
 - **Only one service should mount the shared volume.** `storage` is a single
   ReadWriteOnce claim for the whole environment. Two databases mounting it
   would write to the same directory.
-- **A non-root image usually cannot write the shared volume.** The operator
-  sets no pod `securityContext` or `fsGroup`, so on any provisioner that
-  presents the volume root as `root:root 0755` — most CSI drivers, EBS, GCE PD
-  — an image running as a non-root user fails to write to it. Postgres, MySQL
-  and MongoDB are fine because they start as root and `chown` their data
-  directory; Prometheus (`nobody`) and Grafana (uid 472) are not, which is why
-  `observability` declares no storage at all. A cluster with a 0777
-  StorageClass, such as k3s `local-path`, hides this.
+- **A non-root image needs `storage.fsGroup`.** Without it the volume root is
+  presented as the provisioner leaves it — `root:root 0755` on most CSI
+  drivers, EBS and GCE PD — and a non-root process cannot write. Postgres,
+  MySQL and MongoDB are fine because they start as root and `chown` their data
+  directory; Prometheus (`nobody`, 65534) and Grafana (uid 472) are not, so
+  `observability` sets `fsGroup: 65534`. A cluster with a 0777 StorageClass,
+  such as k3s `local-path`, works without it, which is why this usually
+  surfaces only on a second cluster.
 - **A volume nothing mounts stays `Pending` forever** on a cluster whose
   StorageClass binds on first consumer, while the environment still reports
   Ready. If you declare `storage`, give something a `mountPath` —
