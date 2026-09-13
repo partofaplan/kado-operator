@@ -164,9 +164,17 @@ spec:
       registry: registry.internal:5000   # -> registry.internal:5000/postgres:16-alpine
 ```
 
-A service's own `registry` wins over the environment's. Both accept a host,
-optionally a port, and optionally a namespace path — no scheme and no trailing
-slash, which the CRD enforces.
+A service's own `registry` wins over the environment's. Both accept a host with
+an optional port and an optional namespace path — and also a bare name, which
+is treated as a Docker Hub organisation. No scheme and no trailing slash; the
+CRD rejects those at apply time rather than letting `https://ghcr.io/redis:7`
+fail later at pull time. An explicit empty string means "unset", so a templated
+`registry: {{ .Values.registry }}` with no value behaves as if the field were
+absent.
+
+An IPv6 literal such as `[::1]:5000` cannot be used in `registry`. It works
+inside `image`, where it is recognised as a host, so pin the full reference on
+the service instead.
 
 **An image that already names a registry is left alone.** So a service pinned to
 `quay.io/team/api:1` keeps it even when the environment sets a registry, and
@@ -180,12 +188,25 @@ spec:
       image: quay.io/team/api:1   # unchanged — it already names a host
 ```
 
+That is also how one service opts out of an environment-wide registry: name the
+host in the image. For Docker Hub, that means writing it out in full.
+
+```yaml
+spec:
+  registry: ghcr.io/myorg
+  services:
+    - name: redis
+      image: docker.io/library/redis:7-alpine   # stays on Docker Hub
+```
+
 The test for "already names a registry" is Docker's own, so it behaves the way
 every other tool does: the first path segment is a host if it contains a dot or
 a colon, or is exactly `localhost`. Two consequences worth knowing:
 
 - `bitnami/redis:7` is a Docker Hub **organisation**, not a host, so it does get
   prefixed — `ghcr.io/myorg/bitnami/redis:7`.
+- A dotless but uppercase first segment *is* a host, because a repository path
+  may not contain uppercase. `MYHOST/app:1` is left alone.
 - Rewriting is prefix-only. There is no way to redirect `quay.io/team/api` to a
   mirror through this field, because only you know how your mirror lays those
   images out. Configure a registry mirror on the nodes for that.

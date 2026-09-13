@@ -99,7 +99,7 @@ spec:
                   Leave unset for the default: each image reference is used exactly as
                   written, which for a bare name means Docker Hub.
                 maxLength: 255
-                pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
+                pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
                 type: string
               services:
                 description: services are the supporting services deployed into the
@@ -318,7 +318,7 @@ spec:
                         it; there is no need to opt out, because an image that names its own
                         registry is never rewritten.
                       maxLength: 255
-                      pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
+                      pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
                       type: string
                     replicas:
                       default: 1

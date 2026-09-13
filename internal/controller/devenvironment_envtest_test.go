@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -133,9 +134,18 @@ var _ = Describe("DevEnvironment", func() {
 	// image reference and fail at pull time instead of at apply time.
 	DescribeTable("rejects a malformed registry at admission",
 		func(registry string) {
+			// Asserted on both fields, because they carry the same pattern and
+			// nothing but a test would notice if one of them lost it.
 			env := newResource(uniqueName())
 			env.Spec.Registry = registry
-			Expect(k8sClient.Create(ctx, env)).NotTo(Succeed())
+			// MatchError, not a bare NotTo(Succeed()): without it an entry that
+			// failed for an unrelated reason — a name collision, some other
+			// invalid field — would pass silently and assert nothing.
+			Expect(k8sClient.Create(ctx, env)).To(MatchError(ContainSubstring("spec.registry")))
+
+			svcEnv := newResource(uniqueName())
+			svcEnv.Spec.Services[0].Registry = registry
+			Expect(k8sClient.Create(ctx, svcEnv)).To(MatchError(ContainSubstring("registry")))
 		},
 		Entry("a scheme", "https://ghcr.io"),
 		Entry("a trailing slash", "ghcr.io/myorg/"),
@@ -149,6 +159,7 @@ var _ = Describe("DevEnvironment", func() {
 		func(registry string) {
 			env := newResource(uniqueName())
 			env.Spec.Registry = registry
+			env.Spec.Services[0].Registry = registry
 			Expect(k8sClient.Create(ctx, env)).To(Succeed())
 		},
 		Entry("a bare host", "ghcr.io"),
@@ -157,6 +168,29 @@ var _ = Describe("DevEnvironment", func() {
 		Entry("localhost with a port", "localhost:5000"),
 		Entry("a deep path", "ghcr.io/myorg/team/sub"),
 	)
+
+	// Unstructured on purpose. An explicit empty string is how a templating
+	// tool spells "unset" — `registry: {{ .Values.registry }}` with no value —
+	// but the typed client cannot express it: `omitempty` drops the field
+	// before it is serialised, so the API server never sees it and the pattern
+	// never runs. Only a raw object reaches the validation this asserts.
+	It("accepts an explicitly empty registry, as a templated manifest sends it", func() {
+		name := uniqueName()
+		obj := &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": devenvv1alpha1.GroupVersion.String(),
+			"kind":       "DevEnvironment",
+			"metadata":   map[string]interface{}{"name": name, "namespace": "default"},
+			"spec": map[string]interface{}{
+				"owner":    "platform",
+				"registry": "",
+				"services": []interface{}{map[string]interface{}{
+					"name": "redis", "image": "redis:7-alpine",
+					"port": int64(6379), "registry": "",
+				}},
+			},
+		}}
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+	})
 
 	It("provisions a namespace, deployment and service", func() {
 		name := uniqueName()

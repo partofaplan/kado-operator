@@ -99,7 +99,7 @@ type ServiceSpec struct {
 	// registry is never rewritten.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
 	Registry string `json:"registry,omitempty"`
 
 	// port is the container port exposed through the ClusterIP Service.
@@ -186,7 +186,7 @@ type DevEnvironmentSpec struct {
 	// written, which for a bare name means Docker Hub.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
 	Registry string `json:"registry,omitempty"`
 
 	// services are the supporting services deployed into the environment.

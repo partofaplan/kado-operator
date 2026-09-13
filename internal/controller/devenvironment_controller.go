@@ -454,7 +454,14 @@ func hasRegistry(image string) bool {
 	if !found {
 		return false
 	}
-	return first == "localhost" || strings.ContainsAny(first, ".:")
+	// The uppercase clause is Docker's fourth case and is easy to miss: a path
+	// component may not contain uppercase, so a dotless uppercase first segment
+	// cannot be a repository and must be a host. Without it, `MYHOST/app:1`
+	// would be prefixed into `<registry>/MYHOST/app:1` — an invalid reference
+	// that fails at pull time as InvalidImageName rather than being left alone.
+	return first == "localhost" ||
+		strings.ContainsAny(first, ".:") ||
+		strings.ToLower(first) != first
 }
 
 // readinessProbe renders the service's probe, defaulting an empty handler to a

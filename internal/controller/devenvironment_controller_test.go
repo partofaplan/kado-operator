@@ -910,6 +910,24 @@ func TestImageRef(t *testing.T) {
 			"ghcr.io/myorg", "bitnami/redis:7", "", "ghcr.io/myorg/bitnami/redis:7"},
 		{"a bare name with a tag containing a colon is not a registry",
 			"ghcr.io", "redis:7-alpine", "", "ghcr.io/redis:7-alpine"},
+
+		// Docker's fourth case: a path component may not contain uppercase, so
+		// a dotless uppercase first segment can only be a host. Without this,
+		// the result would be an invalid reference rather than a left-alone one.
+		{"a dotless uppercase first segment is a host",
+			"ghcr.io/myorg", "MYHOST/app:1", "", "MYHOST/app:1"},
+
+		// The reference forms most likely to break a future rewrite.
+		{"a digest reference with no registry is still prefixed",
+			"ghcr.io/myorg", "redis@sha256:abc123", "", "ghcr.io/myorg/redis@sha256:abc123"},
+		{"a digest reference that names a registry is left alone",
+			"ghcr.io/myorg", "quay.io/team/api@sha256:abc123", "", "quay.io/team/api@sha256:abc123"},
+		{"an image with no tag at all is still prefixed",
+			"ghcr.io/myorg", "redis", "", "ghcr.io/myorg/redis"},
+
+		// An explicit empty string is how a templating tool spells "unset".
+		{"an explicit empty service registry inherits the environment's",
+			"ghcr.io/myorg", "redis:7-alpine", "", "ghcr.io/myorg/redis:7-alpine"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, imageRef(env(tc.envReg), svc(tc.image, tc.reg)))
