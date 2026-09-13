@@ -175,6 +175,13 @@ fail later at pull time. An explicit empty string means "unset", so a templated
 `registry: {{ .Values.registry }}` with no value behaves as if the field were
 absent.
 
+A port, if given, must be a real TCP port — between 1 and 65535. The CRD
+rejects `:0` and `:99999` at apply time for the same reason it rejects a
+scheme: neither could ever pull, and failing on `kubectl apply` beats failing
+later in `ImagePullBackOff`. Only the canonical spelling is accepted, so a
+zero-padded `:0080` is rejected too, even though Docker's grammar allows it —
+write `:80`.
+
 An IPv6 literal such as `[::1]:5000` cannot be used in `registry`. It works
 inside `image`, where it is recognised as a host, so pin the full reference on
 the service instead.
