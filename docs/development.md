@@ -131,6 +131,21 @@ they are ever changed back:
   So in that one recovery path a version tag can move. Repeating a push beats
   burning a release number, and it only happens after a release has failed.
 
+## The backlog
+
+Tracked in [GitHub Issues](https://github.com/partofaplan/kado-operator/issues),
+not in a file here — a checked-in backlog would put every idea through the full
+loop below, cutting a version and deploying to `picard` for a note to self.
+
+```bash
+gh issue list
+gh issue create --label enhancement --title "..." --body "..."
+```
+
+When a change defers something, open an issue before the reasoning is lost, and
+reference it from the merge request. `Closes #14` in a PR body closes the issue
+on merge.
+
 ## The local loop
 
 Everything here acts on the **current kubectl context**. The operator is

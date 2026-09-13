@@ -120,6 +120,29 @@ you have selected. It is a tool, not a gate — reach for it deliberately when y
 are changing reconciler behaviour and want the feedback early, against a cluster
 of your own.
 
+### Where work comes from
+
+The backlog is **GitHub Issues**, not a file in this repository.
+
+```bash
+gh issue list                    # what is waiting
+gh issue view <n>                # why, and what was already decided
+gh issue create --label enhancement --title "..." --body "..."
+```
+
+That is a deliberate choice about cost. Every change to a tracked file goes
+through the five gates below — a branch, an independent review, CI, a version
+bump and a deploy to `picard`. Correct for changing the operator, and absurd
+for writing down an idea: a checked-in backlog would cut a release every time
+someone had a thought, and would rot the moment one went stale.
+
+Issues cost nothing to open, carry the reasoning next to the item, and prune
+themselves — a merge request saying `Closes #14` closes the issue with it.
+
+So: when a decision defers something, **open an issue before the context is
+lost**, and say in the merge request that you did. A deferral recorded only in a
+commit message is a deferral nobody will find.
+
 ### Gate 1 — One branch per loop
 
 **Every change to the codebase starts on a feature branch cut from `develop`.**
