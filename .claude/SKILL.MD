@@ -130,14 +130,20 @@ gh issue view <n>                # why, and what was already decided
 gh issue create --label enhancement --title "..." --body "..."
 ```
 
-That is a deliberate choice about cost. Every change to a tracked file goes
-through the five gates below — a branch, an independent review, CI, a version
-bump and a deploy to `picard`. Correct for changing the operator, and absurd
-for writing down an idea: a checked-in backlog would cut a release every time
-someone had a thought, and would rot the moment one went stale.
+That is a deliberate choice about cost. Every merge into `develop` goes through
+the five gates below — a branch, an independent review, CI, a MINOR version bump
+and a deploy to `picard`. Correct for changing the operator, and absurd for
+writing down an idea: a checked-in backlog would cut a version every time
+someone had a thought, and would rot the moment one entry went stale.
 
-Issues cost nothing to open, carry the reasoning next to the item, and prune
-themselves — a merge request saying `Closes #14` closes the issue with it.
+Issues cost nothing to open and carry the reasoning next to the item.
+
+**Closing them is not automatic here, and it is worth knowing why.** GitHub
+fires a closing keyword only when it reaches the **default branch**, which is
+`main` — and feature work merges into `develop`. So `Closes #14` in a merge
+request body records the link and leaves the issue open. Put the keyword in a
+**commit message** instead and it fires when that commit reaches `main` on the
+next promotion. Otherwise close the issue by hand when the work merges.
 
 So: when a decision defers something, **open an issue before the context is
 lost**, and say in the merge request that you did. A deferral recorded only in a

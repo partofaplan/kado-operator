@@ -135,7 +135,8 @@ they are ever changed back:
 
 Tracked in [GitHub Issues](https://github.com/partofaplan/kado-operator/issues),
 not in a file here — a checked-in backlog would put every idea through the full
-loop below, cutting a version and deploying to `picard` for a note to self.
+loop described above, cutting a version and deploying to `picard` for a note to
+self.
 
 ```bash
 gh issue list
@@ -143,8 +144,13 @@ gh issue create --label enhancement --title "..." --body "..."
 ```
 
 When a change defers something, open an issue before the reasoning is lost, and
-reference it from the merge request. `Closes #14` in a PR body closes the issue
-on merge.
+reference it from the merge request.
+
+Closing is not automatic: GitHub fires a closing keyword only on the **default
+branch**, which is `main`, and feature work merges into `develop`. `Closes #14`
+in a PR body records the link but leaves the issue open. Put it in a **commit
+message** and it fires when that commit reaches `main` on the next promotion;
+otherwise close it by hand.
 
 ## The local loop
 
