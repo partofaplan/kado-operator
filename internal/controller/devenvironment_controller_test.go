@@ -830,15 +830,16 @@ func TestReconcileReportsImagePullAndSchedulingFailures(t *testing.T) {
 	})
 }
 
-// A terminating pod is on its way out by design — reporting it would make every
-// rollout look degraded.
 // stalledDeployment is a Deployment the controller has given up progressing:
-// the shape Kubernetes produces when no replica becomes ready in time.
-func stalledDeployment(envName, svc string) *appsv1.Deployment {
+// the shape Kubernetes produces when no replica becomes ready in time. Named
+// for newEnv's only service, which these fixtures pair with.
+func stalledDeployment() *appsv1.Deployment {
+	const svc = "redis"
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      svc,
-			Namespace: targetNS,
+			Name:       svc,
+			Namespace:  targetNS,
+			Generation: 1,
 			Labels: map[string]string{
 				labelManagedBy:   managerName,
 				labelEnvironment: envName,
@@ -846,6 +847,8 @@ func stalledDeployment(envName, svc string) *appsv1.Deployment {
 			},
 		},
 		Status: appsv1.DeploymentStatus{
+			// Status has caught up with spec; see the ObservedGeneration gate.
+			ObservedGeneration: 1,
 			Conditions: []appsv1.DeploymentCondition{{
 				Type:    appsv1.DeploymentProgressing,
 				Status:  corev1.ConditionFalse,
@@ -859,7 +862,8 @@ func stalledDeployment(envName, svc string) *appsv1.Deployment {
 // runningNotReadyPod is the case #15 describes: nothing is wrong with the
 // container, it just never answers its probe. No waiting reason, so the pod
 // pass finds nothing to report.
-func runningNotReadyPod(envName, svc string) *corev1.Pod {
+func runningNotReadyPod() *corev1.Pod {
+	const svc = "redis"
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      svc + "-pod",
@@ -883,8 +887,8 @@ func runningNotReadyPod(envName, svc string) *corev1.Pod {
 
 func TestReconcileReportsAServiceThatNeverBecomesReady(t *testing.T) {
 	r, c := newReconciler(t, newEnv(),
-		runningNotReadyPod(envName, "redis"),
-		stalledDeployment(envName, "redis"),
+		runningNotReadyPod(),
+		stalledDeployment(),
 	)
 	reconcile(t, r)
 
@@ -899,14 +903,55 @@ func TestReconcileReportsAServiceThatNeverBecomesReady(t *testing.T) {
 	assert.Contains(t, cond.Message, "readinessProbe")
 }
 
+func TestReconcileIgnoresAStaleDeadlineFromThePreviousRollout(t *testing.T) {
+	// The user has just fixed the probe, so spec moved and the Deployment
+	// controller has not caught up. Its conditions still describe the rollout
+	// that failed; reporting them would fire Degraded in the very reconcile
+	// that applies the fix.
+	stale := stalledDeployment()
+	stale.Generation = 2
+	stale.Status.ObservedGeneration = 1
+
+	r, c := newReconciler(t, newEnv(), runningNotReadyPod(), stale)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+	assert.False(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded),
+		"a stale condition from the previous rollout must not report as current")
+}
+
+func TestStalledReportsReplicaFailureRatherThanGuessingAtTheProbe(t *testing.T) {
+	// A ReplicaSet that cannot create pods at all trips the same deadline with
+	// no pod to inspect. Claiming a readinessProbe problem there would bury
+	// the real reason.
+	blocked := stalledDeployment()
+	blocked.Status.Conditions = append(blocked.Status.Conditions, appsv1.DeploymentCondition{
+		Type:    appsv1.DeploymentReplicaFailure,
+		Status:  corev1.ConditionTrue,
+		Reason:  "FailedCreate",
+		Message: `pods "redis-" is forbidden: exceeded quota: dev-quota`,
+	})
+
+	r, c := newReconciler(t, newEnv(), blocked)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+	cond := meta.FindStatusCondition(env.Status.Conditions, devenvv1alpha1.ConditionDegraded)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message, "exceeded quota")
+	assert.NotContains(t, cond.Message, "readinessProbe")
+}
+
 func TestReconcileDoesNotReportAServiceStillWithinItsDeadline(t *testing.T) {
 	// The same not-ready pod, but the Deployment has not given up. This is an
 	// ordinary slow start and must not read as degraded.
-	progressing := stalledDeployment(envName, "redis")
+	progressing := stalledDeployment()
 	progressing.Status.Conditions[0].Status = corev1.ConditionTrue
 	progressing.Status.Conditions[0].Reason = "ReplicaSetUpdated"
 
-	r, c := newReconciler(t, newEnv(), runningNotReadyPod(envName, "redis"), progressing)
+	r, c := newReconciler(t, newEnv(), runningNotReadyPod(), progressing)
 	reconcile(t, r)
 
 	var env devenvv1alpha1.DevEnvironment
@@ -917,12 +962,12 @@ func TestReconcileDoesNotReportAServiceStillWithinItsDeadline(t *testing.T) {
 func TestStalledDeploymentDoesNotMaskAContainerProblem(t *testing.T) {
 	// A crash loop trips the progress deadline too. "It crashed" explains more
 	// than "it timed out", so the pod problem must win.
-	crashing := runningNotReadyPod(envName, "redis")
+	crashing := runningNotReadyPod()
 	crashing.Status.ContainerStatuses[0].State = corev1.ContainerState{
 		Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off 5m0s"},
 	}
 
-	r, c := newReconciler(t, newEnv(), crashing, stalledDeployment(envName, "redis"))
+	r, c := newReconciler(t, newEnv(), crashing, stalledDeployment())
 	reconcile(t, r)
 
 	var env devenvv1alpha1.DevEnvironment
@@ -933,6 +978,8 @@ func TestStalledDeploymentDoesNotMaskAContainerProblem(t *testing.T) {
 	assert.NotContains(t, cond.Message, "Stalled")
 }
 
+// A terminating pod is on its way out by design — reporting it would make every
+// rollout look degraded.
 func TestWorkloadProblemsIgnoresTerminatingPods(t *testing.T) {
 	exit := int32(1)
 	pod := crashingPod("redis", "CrashLoopBackOff", &exit)

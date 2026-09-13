@@ -838,8 +838,12 @@ func (r *DevEnvironmentReconciler) addStalledServices(
 	ns string,
 	byService map[string]string,
 ) {
+	// r.List, not r.reader(): Deployments are watched by this controller so the
+	// cache already holds them, and pruneServices reads them the same way. The
+	// pod pass above needs the uncached reader only because Pods are
+	// deliberately not watched.
 	var deploys appsv1.DeploymentList
-	if err := r.reader().List(ctx, &deploys,
+	if err := r.List(ctx, &deploys,
 		client.InNamespace(ns),
 		client.MatchingLabels{labelManagedBy: managerName, labelEnvironment: env.Name},
 	); err != nil {
@@ -856,15 +860,40 @@ func (r *DevEnvironmentReconciler) addStalledServices(
 		if !progressDeadlineExceeded(d) {
 			continue
 		}
-		byService[svc] = "Stalled: no replica became ready within the deployment's " +
-			"progress deadline; the container is running but not passing its " +
-			"readinessProbe — check that something listens on the service port"
+		byService[svc] = stalledDetail(d)
 	}
+}
+
+// stalledDetail explains a blown progress deadline without inventing a cause.
+//
+// The deadline says only that no replica became ready in time. The usual
+// reason is a readinessProbe nothing answers, but a ReplicaSet that cannot
+// create pods at all — a quota, an admission webhook — trips the same deadline
+// with no pod for the pass above to find, and reporting a probe problem there
+// would be a fabricated diagnosis that buries the real one. ReplicaFailure
+// carries that reason, so prefer it when Kubernetes has set it.
+func stalledDetail(d *appsv1.Deployment) string {
+	const base = "Stalled: no replica became ready within the deployment's progress deadline"
+	for i := range d.Status.Conditions {
+		c := &d.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+			return fmt.Sprintf("%s; %s: %s", base, c.Reason, c.Message)
+		}
+	}
+	return base + "; if the container is running, its readinessProbe is not passing — " +
+		"check that something listens on the port the probe targets"
 }
 
 // progressDeadlineExceeded reports whether the Deployment controller has given
 // up waiting for this rollout.
 func progressDeadlineExceeded(d *appsv1.Deployment) bool {
+	// A Deployment the controller has not looked at since the last spec change
+	// still carries the PREVIOUS rollout's conditions. Reading them as current
+	// would report the old failure in the very reconcile that applies the
+	// user's fix, so wait until status has caught up with spec.
+	if d.Status.ObservedGeneration < d.Generation {
+		return false
+	}
 	for i := range d.Status.Conditions {
 		c := &d.Status.Conditions[i]
 		if c.Type == appsv1.DeploymentProgressing &&
