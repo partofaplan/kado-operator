@@ -151,6 +151,11 @@ spec:
                         credentials for it and does not inherit the environment's. Leave unset
                         to inherit.
 
+                        An explicitly empty list inherits too, rather than clearing. That
+                        matches how an empty registry behaves and keeps a templated manifest
+                        that renders `imagePullSecrets: []` from silently dropping credentials
+                        and turning into an ImagePullBackOff.
+
                         Each Secret must be of type kubernetes.io/dockerconfigjson or the legacy
                         kubernetes.io/dockercfg; anything else is rejected during reconcile
                         rather than becoming an ImagePullBackOff with no explanation.

@@ -49,15 +49,17 @@ jobs:
       #   - Never leave a check unreported: `paths-ignore` would skip the
       #     workflow entirely, leaving required checks pending forever and the
       #     PR unmergeable, with no override (enforce_admins is on).
-      #   - Never skip on anything but a definite answer: the gating `if:` uses
-      #     `always() && ... != 'false'`, not `== 'true'`. Without `always()` a
-      #     *failed* changes job (runner, checkout, git) skips every gated job,
-      #     and skipped satisfies the requirement — so a code change could merge
+      #   - Never skip on anything but a definite answer: the gating `if:` is
+      #     `!cancelled() && ... != 'false'`, not `== 'true'`. A plain
+      #     comparison is ANDed with an implicit `success()`, so a *failed*
+      #     changes job (runner, checkout, git) would skip every gated job —
+      #     and skipped satisfies the requirement, letting a code change merge
       #     with lint, codegen, tests and the image build never having run.
-      #     Only an explicit code=false skips anything. `!cancelled()` rather
-      #     than `always()`: this workflow cancels superseded PR runs on
-      #     purpose, and `always()` would run these jobs through a cancellation
-      #     and keep spinning up the integration cluster.
+      #     Only an explicit code=false skips anything.
+      #
+      #     `!cancelled()` and not `always()`: this workflow cancels superseded
+      #     PR runs on purpose, and `always()` would carry them through the
+      #     cancellation and keep spinning up the integration cluster.
       #
       # The script below fails open for the same reason: anything ambiguous
       # sets code=true.
