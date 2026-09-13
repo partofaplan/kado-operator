@@ -358,6 +358,64 @@ func TestReferencedPullSecretsAreDedupedAndSorted(t *testing.T) {
 	assert.Equal(t, []string{"alpha", "mike", "zulu"}, referencedPullSecrets(env))
 }
 
+func TestReconcileRefusesToReplaceASecretItDoesNotOwn(t *testing.T) {
+	// The environment namespace is somewhere developers deploy into, so a
+	// same-named Secret from cert-manager or a person is possible. Replacing
+	// the copy on a type change must never destroy one of those (#48).
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "creds",
+			Namespace: targetNS,
+			Labels:    map[string]string{"app": "something-else"},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{"tls.crt": []byte("theirs")},
+	}
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"creds"}
+	}), dockerCfg("creds"), foreign)
+	ctx := context.Background()
+
+	_, err := r.Reconcile(ctx, request())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not managed by this DevEnvironment")
+
+	// Still there, untouched.
+	var after corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "creds", Namespace: targetNS}, &after))
+	assert.Equal(t, corev1.SecretTypeTLS, after.Type)
+	assert.Equal(t, []byte("theirs"), after.Data["tls.crt"])
+}
+
+func TestReplaceOnTypeChangeReadsThroughTheAPIReader(t *testing.T) {
+	// In production Client reads through the manager's cache. Acting on a
+	// stale copy would delete a Secret that is already correct, so the check
+	// must go through reader(). Client and APIReader are seeded to disagree:
+	// only a reader()-based lookup sees the current type.
+	env := newEnv()
+	sch := testScheme(t)
+
+	stale := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: targetNS},
+		Type:       corev1.SecretTypeOpaque,
+	}
+	current := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: targetNS},
+		Type:       corev1.SecretTypeDockerConfigJson,
+	}
+	r := &DevEnvironmentReconciler{
+		Client:    fake.NewClientBuilder().WithScheme(sch).WithObjects(stale).Build(),
+		Scheme:    sch,
+		APIReader: fake.NewClientBuilder().WithScheme(sch).WithObjects(current).Build(),
+	}
+
+	replaced, err := r.replaceOnTypeChange(
+		context.Background(), env, "creds", targetNS, corev1.SecretTypeDockerConfigJson,
+	)
+	require.NoError(t, err)
+	assert.False(t, replaced, "should not replace: the API says the copy is already the right type")
+}
+
 func TestReconcileRefusesToAdoptUnmanagedNamespace(t *testing.T) {
 	// A namespace someone else already owns must not be taken over, and above
 	// all must not later be deleted by our finalizer.
