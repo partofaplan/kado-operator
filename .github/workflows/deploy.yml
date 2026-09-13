@@ -50,8 +50,9 @@ jobs:
     steps:
       # persist-credentials: false matters more here than on a hosted runner.
       # A self-hosted runner reuses its workspace between jobs, so the default
-      # would leave GITHUB_TOKEN sitting in .git/config on a physical machine.
-      # Nothing after this step needs git auth.
+      # leaves a usable GITHUB_TOKEN behind on a physical machine — in a
+      # RUNNER_TEMP credential file since checkout v6, in .git/config before
+      # that. Nothing after this step needs git auth either way.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
