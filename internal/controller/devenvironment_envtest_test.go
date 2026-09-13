@@ -217,7 +217,7 @@ var _ = Describe("DevEnvironment", func() {
 
 		checked := 0
 		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			if e.IsDir() || (!strings.HasSuffix(e.Name(), ".yaml") && !strings.HasSuffix(e.Name(), ".yml")) {
 				continue
 			}
 			raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
@@ -234,13 +234,20 @@ var _ = Describe("DevEnvironment", func() {
 			// leaving the file's value would collide across runs.
 			unstructured.RemoveNestedField(obj.Object, "spec", "namespaceName")
 
-			Expect(k8sClient.Create(ctx, obj, client.DryRunAll)).
+			// Strict matters more than the dry-run does. The server defaults to
+			// Warn, which PRUNES an unknown field and returns success — so a
+			// field renamed in the API would leave this green while a user's
+			// `kubectl apply` (strict since 1.25) failed on it. Strict is what
+			// makes this catch the rot it exists to catch.
+			Expect(k8sClient.Create(ctx, obj, client.DryRunAll, client.FieldValidation("Strict"))).
 				To(Succeed(), "examples/%s is not valid against the CRD", e.Name())
 			checked++
 		}
-		// Guards against the loop silently checking nothing if the directory
-		// moves or the suffix changes.
-		Expect(checked).To(BeNumerically(">=", 5), "expected to validate the example manifests")
+		// Guards against the loop silently checking nothing — or fewer files
+		// than exist — if the directory moves or one is dropped by accident.
+		// Raise this when adding an example; it failing on a deliberate
+		// removal is the point.
+		Expect(checked).To(BeNumerically(">=", 6), "expected to validate every example manifest")
 	})
 
 	It("provisions a namespace, deployment and service", func() {

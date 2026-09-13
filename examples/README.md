@@ -52,6 +52,14 @@ looks like a bug later:
 - **Only one service should mount the shared volume.** `storage` is a single
   ReadWriteOnce claim for the whole environment. Two databases mounting it
   would write to the same directory.
+- **A non-root image usually cannot write the shared volume.** The operator
+  sets no pod `securityContext` or `fsGroup`, so on any provisioner that
+  presents the volume root as `root:root 0755` — most CSI drivers, EBS, GCE PD
+  — an image running as a non-root user fails to write to it. Postgres, MySQL
+  and MongoDB are fine because they start as root and `chown` their data
+  directory; Prometheus (`nobody`) and Grafana (uid 472) are not, which is why
+  `observability` declares no storage at all. A cluster with a 0777
+  StorageClass, such as k3s `local-path`, hides this.
 - **A volume nothing mounts stays `Pending` forever** on a cluster whose
   StorageClass binds on first consumer, while the environment still reports
   Ready. If you declare `storage`, give something a `mountPath` —
@@ -66,8 +74,8 @@ looks like a bug later:
 
 ## Verification
 
-Every example in this directory was applied to a live cluster, reached `Ready`
-with zero container restarts, and was checked to actually serve — `pg_isready`,
+Every example in this directory was applied to a live cluster (k3s/k3d),
+reached `Ready` with zero container restarts, and was checked to actually serve — `pg_isready`,
 `mysqladmin ping`, `mongosh` ping, `rabbitmq-diagnostics ping`, `redis-cli
 ping`, a memcached `version`, and HTTP 200 from Adminer, Grafana, Prometheus
 and Mailpit. `make test` re-checks that each file still satisfies the CRD

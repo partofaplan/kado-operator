@@ -17,8 +17,16 @@ metadata:
 spec:
   owner: platform-team
 
-  storage:
-    size: 2Gi
+  # No storage, deliberately. Prometheus runs as `nobody` and Grafana as uid
+  # 472, and the operator sets no pod securityContext or fsGroup — so on any
+  # provisioner that presents the volume root as root:root 0755 (most CSI
+  # drivers, EBS, GCE PD) neither can write to it, and Prometheus panics at
+  # startup with "Unable to create mmap-ed active query log". It only appears
+  # to work on a cluster whose StorageClass happens to mount 0777, such as
+  # k3s local-path.
+  #
+  # Metrics here are therefore in-container and go away with the pod, which is
+  # the right trade for a dashboard you are iterating on.
 
   config:
     LOG_LEVEL: debug
@@ -28,7 +36,6 @@ spec:
     - name: prometheus
       image: prom/prometheus:v3.1.0
       port: 9090
-      mountPath: /prometheus
       readinessProbe: {}
       resources:
         requests: { cpu: 100m, memory: 256Mi }

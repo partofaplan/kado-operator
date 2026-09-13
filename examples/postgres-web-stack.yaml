@@ -24,8 +24,10 @@ spec:
   storage:
     size: 1Gi
 
-  # Injected into every service via envFrom, so your application picks these up
-  # too if you run it in this namespace.
+  # Rendered as a ConfigMap named <environment>-config and attached via
+  # envFrom to the services BELOW — only those. A pod you write by hand in this
+  # namespace does not inherit it; reference the ConfigMap yourself with
+  # envFrom.configMapRef.
   config:
     LOG_LEVEL: debug
     ENVIRONMENT: development
