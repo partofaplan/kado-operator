@@ -321,7 +321,12 @@ this** — `postgres`, `mysql` and `mongo` all do. Images that run as a fixed
 non-root user do: Prometheus is `nobody` (65534), Grafana is uid 472.
 
 The field applies only to services that actually mount the volume, so adding it
-does not restart anything else. `fsGroup` is a pod-level setting and the shared
+does not restart anything else. It does roll the service that mounts it, and on
+a cluster whose CSI driver enforces single-node attachment that is the one
+rollout which can deadlock — the replacement pod wants the ReadWriteOnce claim
+while the old pod still holds it, and neither gives way
+([#51](https://github.com/partofaplan/kado-operator/issues/51)). There, delete
+and recreate the environment rather than editing `fsGroup` in place. `fsGroup` is a pod-level setting and the shared
 volume is meant to be mounted by one service, so it lives on `storage` rather
 than per service.
 

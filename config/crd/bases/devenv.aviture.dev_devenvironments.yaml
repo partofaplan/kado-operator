@@ -475,9 +475,15 @@ spec:
                       supplementary groups.
 
                       Applies only to services that actually mount the volume, so adding it
-                      does not restart anything else. A cluster whose StorageClass happens to
-                      mount 0777, such as k3s local-path, works without it — which is why the
-                      need for it usually surfaces only on a second cluster.
+                      does not restart anything else. It does roll the service that mounts it,
+                      and that is the one rollout which can deadlock on a single-attach CSI
+                      driver: the replacement pod wants the ReadWriteOnce claim while the old
+                      pod still holds it (#51). On such a cluster, recreate the environment
+                      rather than editing this field in place.
+
+                      A cluster whose StorageClass happens to mount 0777, such as k3s
+                      local-path, works without it — which is why the need for it usually
+                      surfaces only on a second cluster.
                     format: int64
                     maximum: 2147483647
                     minimum: 1

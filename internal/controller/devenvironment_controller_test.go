@@ -847,8 +847,10 @@ func stalledDeployment() *appsv1.Deployment {
 			},
 		},
 		Status: appsv1.DeploymentStatus{
-			// Status has caught up with spec; see the ObservedGeneration gate.
+			// Status has caught up with spec, and a pod from the current
+			// template exists: both gates in progressDeadlineExceeded.
 			ObservedGeneration: 1,
+			UpdatedReplicas:    1,
 			Conditions: []appsv1.DeploymentCondition{{
 				Type:    appsv1.DeploymentProgressing,
 				Status:  corev1.ConditionFalse,
@@ -919,6 +921,21 @@ func TestReconcileIgnoresAStaleDeadlineFromThePreviousRollout(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
 	assert.False(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded),
 		"a stale condition from the previous rollout must not report as current")
+}
+
+func TestReconcileIgnoresADeadlineBeforeTheNewTemplateHasAPod(t *testing.T) {
+	// Spec has been fixed and status has caught up, but no pod from the new
+	// template exists yet — so the carried-over condition cannot be describing
+	// this rollout.
+	early := stalledDeployment()
+	early.Status.UpdatedReplicas = 0
+
+	r, c := newReconciler(t, newEnv(), runningNotReadyPod(), early)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+	assert.False(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded))
 }
 
 func TestStalledReportsReplicaFailureRatherThanGuessingAtTheProbe(t *testing.T) {
