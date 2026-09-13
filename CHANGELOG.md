@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `spec.imagePullSecrets` and `spec.services[].imagePullSecrets`: authenticate
+  to a private registry. Names docker-registry Secrets in the `DevEnvironment`'s
+  own namespace, which are copied into the environment namespace alongside
+  `secretRefs`. A service's list replaces the environment's rather than adding
+  to it, the same precedence `registry` uses. A Secret that is neither
+  `kubernetes.io/dockerconfigjson` nor `kubernetes.io/dockercfg` is rejected
+  during reconcile, because the kubelet accepts a wrong-typed pull secret and
+  then silently ignores it.
+
 - `spec.registry` and `spec.services[].registry`: choose the registry service
   images are pulled from, for the whole environment or one service at a time.
   The service-level field overrides the environment's. An image that already

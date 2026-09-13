@@ -134,9 +134,9 @@ type ServiceSpec struct {
 	// credentials for it and does not inherit the environment's. Leave unset
 	// to inherit.
 	//
-	// Each Secret must be of type kubernetes.io/dockerconfigjson; anything
-	// else is rejected during reconcile rather than becoming an
-	// ImagePullBackOff with no explanation.
+	// Each Secret must be of type kubernetes.io/dockerconfigjson or the legacy
+	// kubernetes.io/dockercfg; anything else is rejected during reconcile
+	// rather than becoming an ImagePullBackOff with no explanation.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:items:MaxLength=253
@@ -216,9 +216,9 @@ type DevEnvironmentSpec struct {
 	// replaces this one rather than adding to it, matching how registry
 	// behaves.
 	//
-	// Each Secret must be of type kubernetes.io/dockerconfigjson; anything
-	// else is rejected during reconcile rather than becoming an
-	// ImagePullBackOff with no explanation.
+	// Each Secret must be of type kubernetes.io/dockerconfigjson or the legacy
+	// kubernetes.io/dockercfg; anything else is rejected during reconcile
+	// rather than becoming an ImagePullBackOff with no explanation.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:items:MaxLength=253

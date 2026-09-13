@@ -282,10 +282,15 @@ func (r *DevEnvironmentReconciler) reconcileSecrets(ctx context.Context, env *de
 		// ImagePullBackOff that looks identical to a missing credential.
 		// Rejecting it here puts the reason in the DevEnvironment's own
 		// conditions instead.
-		if _, isPull := pull[name]; isPull && src.Type != corev1.SecretTypeDockerConfigJson {
+		//
+		// Both types the kubelet honours are accepted. Taking only
+		// dockerconfigjson would fail the whole environment over a legacy
+		// dockercfg Secret that would in fact have worked — a stricter rule
+		// than Kubernetes' own, which is not this check's job.
+		if _, isPull := pull[name]; isPull && !isDockerAuthSecret(src.Type) {
 			return fmt.Errorf(
-				"secret %q is named in imagePullSecrets but has type %q, want %q",
-				name, src.Type, corev1.SecretTypeDockerConfigJson,
+				"secret %q is named in imagePullSecrets but has type %q, want %q or %q",
+				name, src.Type, corev1.SecretTypeDockerConfigJson, corev1.SecretTypeDockercfg,
 			)
 		}
 
@@ -869,6 +874,13 @@ func pullSecretRefs(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.Ser
 		refs = append(refs, corev1.LocalObjectReference{Name: name})
 	}
 	return refs
+}
+
+// isDockerAuthSecret reports whether a Secret type is one the kubelet will use
+// as an image pull secret. dockercfg is the pre-1.9 format and is still
+// honoured.
+func isDockerAuthSecret(t corev1.SecretType) bool {
+	return t == corev1.SecretTypeDockerConfigJson || t == corev1.SecretTypeDockercfg
 }
 
 // referencedPullSecrets returns the deduplicated, sorted set of secrets used as

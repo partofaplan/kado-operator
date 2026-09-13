@@ -266,6 +266,27 @@ func TestReconcileLeavesPullSecretsUnsetWhenNoneAreNamed(t *testing.T) {
 	assert.Nil(t, deploy.Spec.Template.Spec.ImagePullSecrets)
 }
 
+func TestReconcileAcceptsALegacyDockercfgPullSecret(t *testing.T) {
+	// The kubelet still honours the pre-1.9 format, so rejecting it would fail
+	// the whole environment over a credential that would have worked.
+	legacy := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "old-creds", Namespace: envNS},
+		Type:       corev1.SecretTypeDockercfg,
+		Data:       map[string][]byte{".dockercfg": []byte(`{}`)},
+	}
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"old-creds"}
+	}), legacy)
+	reconcile(t, r)
+
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	assert.Equal(t,
+		[]corev1.LocalObjectReference{{Name: "old-creds"}},
+		deploy.Spec.Template.Spec.ImagePullSecrets,
+	)
+}
+
 func TestReconcileRejectsAPullSecretOfTheWrongType(t *testing.T) {
 	// An Opaque secret is accepted by the API server and then silently ignored
 	// by the kubelet, so without this check the only symptom is an
