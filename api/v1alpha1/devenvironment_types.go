@@ -99,7 +99,18 @@ type ServiceSpec struct {
 	// registry is never rewritten.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
-	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	// The port alternation reads as 1-65535, longest form first: 65530-65535,
+	// 65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999. It is
+	// not pretty, but `[0-9]{1,5}` admitted `:0` and `:99999`, and neither is
+	// a TCP port — they failed at pull time, which is the failure this field's
+	// validation exists to prevent (#21).
+	//
+	// It lives in the pattern rather than a CEL rule because a CEL rule on a
+	// field inside the unbounded services array blows the schema's cost
+	// budget: the API server rejected the CRD outright. Bounding the array
+	// just to afford the rule would impose a service-count limit as a side
+	// effect of a port check.
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
 	Registry string `json:"registry,omitempty"`
 
 	// port is the container port exposed through the ClusterIP Service.
@@ -209,7 +220,18 @@ type DevEnvironmentSpec struct {
 	// written, which for a bare name means Docker Hub.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
-	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	// The port alternation reads as 1-65535, longest form first: 65530-65535,
+	// 65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999. It is
+	// not pretty, but `[0-9]{1,5}` admitted `:0` and `:99999`, and neither is
+	// a TCP port — they failed at pull time, which is the failure this field's
+	// validation exists to prevent (#21).
+	//
+	// It lives in the pattern rather than a CEL rule because a CEL rule on a
+	// field inside the unbounded services array blows the schema's cost
+	// budget: the API server rejected the CRD outright. Bounding the array
+	// just to afford the rule would impose a service-count limit as a side
+	// effect of a port check.
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
 	Registry string `json:"registry,omitempty"`
 
 	// imagePullSecrets names docker-registry Secrets in the DevEnvironment's

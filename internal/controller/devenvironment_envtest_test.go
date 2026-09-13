@@ -192,6 +192,43 @@ var _ = Describe("DevEnvironment", func() {
 		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
 	})
 
+	// The pattern bounds the port to a real TCP port, not just five digits.
+	// Both levels carry it, so both are exercised.
+	DescribeTable("registry ports",
+		func(registry string, accepted bool) {
+			env := newResource(uniqueName())
+			env.Spec.Registry = registry
+			m := Expect(k8sClient.Create(ctx, env))
+			if accepted {
+				m.To(Succeed())
+			} else {
+				m.NotTo(Succeed())
+			}
+		},
+		Entry("no port at all", "ghcr.io", true),
+		Entry("a namespace path, no port", "ghcr.io/myorg", true),
+		Entry("the lowest valid port", "registry.internal:1", true),
+		Entry("a typical port", "registry.internal:5000", true),
+		Entry("a port and a path", "registry.internal:5000/mirror", true),
+		Entry("the highest valid port", "registry.internal:65535", true),
+		// The two the regex alone accepted.
+		Entry("port zero", "registry.internal:0", false),
+		Entry("a port above 65535", "registry.internal:65536", false),
+		Entry("a five-digit port above the range", "ghcr.io:99999", false),
+	)
+
+	It("bounds the port on a service's own registry too", func() {
+		env := newResource(uniqueName())
+		env.Spec.Services[0].Registry = "registry.internal:99999"
+		Expect(k8sClient.Create(ctx, env)).NotTo(Succeed())
+	})
+
+	It("accepts a valid port on a service's own registry", func() {
+		env := newResource(uniqueName())
+		env.Spec.Services[0].Registry = "registry.internal:5000"
+		Expect(k8sClient.Create(ctx, env)).To(Succeed())
+	})
+
 	It("provisions a namespace, deployment and service", func() {
 		name := uniqueName()
 		env := newResource(name)
