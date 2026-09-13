@@ -33,7 +33,7 @@ spec:
       containers:
         - name: manager
           image: {{ include "kado-operator.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ include "kado-operator.pullPolicy" . }}
           command: [/manager]
           args:
             - --health-probe-bind-address=:8081

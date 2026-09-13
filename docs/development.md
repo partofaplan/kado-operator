@@ -310,14 +310,29 @@ helm upgrade --install kado-operator ./charts/kado-operator \
 kubectl -n kado-operator-system logs -f deploy/kado-operator
 ```
 
+Both `--set` values there are load-bearing. `pullPolicy=Never` because a
+side-loaded image must never be fetched — **side-loading always needs it**, and
+with the default `IMAGE_TAG=latest` it is required, since the chart would
+otherwise pull the registry's `latest` straight over the image you just built.
+A tag of your own, like `dev`, keeps the local image out of the way of anything
+published.
+
+Left unset, the chart derives the policy from the tag the way Kubernetes does
+for a bare pod spec — `Always` for the literal `latest`, `IfNotPresent`
+otherwise (#18). That is what stops a node holding an older `latest` from
+quietly keeping it while `helm upgrade` reports success. It is Kubernetes' rule,
+not a moving-tag detector: nothing in a reference says whether a tag moves, so
+any *other* moving tag needs the policy stated outright.
+
 On a remote cluster there is nothing to side-load — push the image and let the
-cluster pull it:
+cluster pull it. `dev` moves every push, so say so:
 
 ```bash
 make docker-push IMAGE_TAG=dev
 helm upgrade --install kado-operator ./charts/kado-operator \
   --namespace kado-operator-system --create-namespace \
-  --set image.tag=dev
+  --set image.tag=dev \
+  --set image.pullPolicy=Always
 ```
 
 ### Deploying from CI
