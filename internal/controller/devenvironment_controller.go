@@ -450,6 +450,7 @@ func (r *DevEnvironmentReconciler) reconcileService(
 		deploy.Spec.Template.Spec.Containers = []corev1.Container{r.container(env, spec)}
 		deploy.Spec.Template.Spec.Volumes = r.volumes(env, spec)
 		deploy.Spec.Template.Spec.ImagePullSecrets = pullSecretRefs(env, spec)
+		deploy.Spec.Template.Spec.SecurityContext = podSecurityContext(env, spec)
 		return nil
 	})
 	if err != nil {
@@ -586,6 +587,31 @@ func readinessProbe(spec *devenvv1alpha1.ServiceSpec) *corev1.Probe {
 		}
 	}
 	return probe
+}
+
+// podSecurityContext carries spec.storage.fsGroup onto the pods that mount the
+// shared volume, which is what lets a non-root image write to it.
+//
+// Only those pods: fsGroup on a pod with no volume changes nothing, and setting
+// it everywhere would roll every service in the environment the first time
+// anyone added the field. The mount test is deliberately the same one volumes()
+// makes, so a service can never get the group without the volume or the other
+// way round.
+//
+// Returns nil when there is nothing to say. Note the API server defaults the
+// field and stores `securityContext: {}` either way, so this does not make the
+// local object match the stored one — CreateOrUpdate issues an Update on every
+// reconcile regardless, as it already did before this field existed, because
+// the mutate rebuilds Containers from scratch each pass. The server treats it
+// as a no-op: resourceVersion and generation do not move, and no rollout
+// happens. nil is simply the honest way to say "unset".
+func podSecurityContext(
+	env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec,
+) *corev1.PodSecurityContext {
+	if spec.MountPath == "" || env.Spec.Storage == nil || env.Spec.Storage.FSGroup == nil {
+		return nil
+	}
+	return &corev1.PodSecurityContext{FSGroup: env.Spec.Storage.FSGroup}
 }
 
 func (r *DevEnvironmentReconciler) volumes(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []corev1.Volume {

@@ -44,6 +44,8 @@ const (
 	envName  = "team-alpha"
 	envNS    = "default"
 	targetNS = "team-alpha"
+	// Shared by the storage specs below; goconst flags the repeated literal.
+	testMountPath = "/data"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -113,7 +115,7 @@ func TestReconcileAddsFinalizer(t *testing.T) {
 func TestReconcileProvisionsEnvironment(t *testing.T) {
 	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
 		e.Spec.Storage = &devenvv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}
-		e.Spec.Services[0].MountPath = "/data"
+		e.Spec.Services[0].MountPath = testMountPath
 	}))
 	reconcile(t, r)
 	ctx := context.Background()
@@ -143,7 +145,7 @@ func TestReconcileProvisionsEnvironment(t *testing.T) {
 	require.Len(t, container.EnvFrom, 1)
 	assert.Equal(t, envName+"-config", container.EnvFrom[0].ConfigMapRef.Name)
 	require.Len(t, container.VolumeMounts, 1)
-	assert.Equal(t, "/data", container.VolumeMounts[0].MountPath)
+	assert.Equal(t, testMountPath, container.VolumeMounts[0].MountPath)
 	require.Len(t, deploy.Spec.Template.Spec.Volumes, 1)
 	assert.Equal(t, envName+"-workspace", deploy.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 
@@ -152,6 +154,52 @@ func TestReconcileProvisionsEnvironment(t *testing.T) {
 	assert.Equal(t, corev1.ServiceTypeClusterIP, svc.Spec.Type)
 	assert.Equal(t, int32(6379), svc.Spec.Ports[0].Port)
 	assert.Equal(t, map[string]string{labelEnvironment: envName, labelService: "redis"}, svc.Spec.Selector)
+}
+
+func TestReconcileSetsFSGroupOnlyOnServicesThatMountTheVolume(t *testing.T) {
+	// fsGroup on a pod with no volume changes nothing, and setting it
+	// everywhere would roll every service the first time anyone added the
+	// field (#47).
+	gid := int64(65534)
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Storage = &devenvv1alpha1.StorageSpec{
+			Size:    resource.MustParse("1Gi"),
+			FSGroup: &gid,
+		}
+		e.Spec.Services[0].MountPath = testMountPath
+		e.Spec.Services = append(e.Spec.Services, devenvv1alpha1.ServiceSpec{
+			Name: "api", Image: "api:1", Port: 8080,
+		})
+	}))
+	reconcile(t, r)
+	ctx := context.Background()
+
+	var mounts appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &mounts))
+	require.NotNil(t, mounts.Spec.Template.Spec.SecurityContext)
+	assert.Equal(t, &gid, mounts.Spec.Template.Spec.SecurityContext.FSGroup)
+
+	var doesNot appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "api", Namespace: targetNS}, &doesNot))
+	assert.Nil(t, doesNot.Spec.Template.Spec.SecurityContext,
+		"a service that mounts nothing should not get a pod securityContext")
+}
+
+func TestReconcileLeavesSecurityContextUnsetWithoutFSGroup(t *testing.T) {
+	// Asserts nil, which holds here only because the fake client does no
+	// defaulting — a real API server stores `securityContext: {}`. The point
+	// of the assertion is that we set no fsGroup, not that the stored form is
+	// nil.
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Storage = &devenvv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}
+		e.Spec.Services[0].MountPath = testMountPath
+	}))
+	reconcile(t, r)
+
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	assert.Nil(t, deploy.Spec.Template.Spec.SecurityContext)
 }
 
 func TestReconcileSkipsPVCWhenNoStorageRequested(t *testing.T) {
