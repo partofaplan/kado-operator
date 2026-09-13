@@ -389,7 +389,7 @@ func (r *DevEnvironmentReconciler) reconcileService(
 func (r *DevEnvironmentReconciler) container(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) corev1.Container {
 	c := corev1.Container{
 		Name:      spec.Name,
-		Image:     spec.Image,
+		Image:     imageRef(env, spec),
 		Ports:     []corev1.ContainerPort{{ContainerPort: spec.Port, Protocol: corev1.ProtocolTCP}},
 		Resources: spec.Resources,
 	}
@@ -421,6 +421,46 @@ func (r *DevEnvironmentReconciler) container(env *devenvv1alpha1.DevEnvironment,
 
 	c.ReadinessProbe = readinessProbe(spec)
 	return c
+}
+
+// imageRef resolves the image a service runs, applying the environment's
+// registry — or the service's own override — to an image that does not already
+// name one.
+func imageRef(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) string {
+	registry := spec.Registry
+	if registry == "" {
+		registry = env.Spec.Registry
+	}
+	if registry == "" || hasRegistry(spec.Image) {
+		return spec.Image
+	}
+	return registry + "/" + spec.Image
+}
+
+// hasRegistry reports whether an image reference already names a registry.
+//
+// This is Docker's own rule, and following it rather than inventing one is
+// what makes the feature predictable. The first path segment is a host if it
+// contains a dot or a colon, is exactly "localhost", or contains an uppercase
+// letter. Everything else is a Docker Hub repository — which is why
+// `redis:7-alpine` is a repository named redis rather than a registry named
+// redis, and why `myteam/api` is a Docker Hub org rather than a host.
+//
+// It also removes the need for a per-service opt-out: a service that pins
+// `quay.io/team/api:1` keeps it even when the environment sets a registry,
+// because rewriting it would produce `<registry>/quay.io/team/api:1`.
+func hasRegistry(image string) bool {
+	first, _, found := strings.Cut(image, "/")
+	if !found {
+		return false
+	}
+	// The uppercase clause is the easiest of the four to miss: a path component
+	// may not contain uppercase, so a dotless uppercase segment cannot be a
+	// repository. Without it `MYHOST/app:1` would become
+	// `<registry>/MYHOST/app:1`, an invalid reference that fails at pull time.
+	return first == "localhost" ||
+		strings.ContainsAny(first, ".:") ||
+		strings.ToLower(first) != first
 }
 
 // readinessProbe renders the service's probe, defaulting an empty handler to a

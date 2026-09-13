@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `spec.registry` and `spec.services[].registry`: choose the registry service
+  images are pulled from, for the whole environment or one service at a time.
+  The service-level field overrides the environment's. An image that already
+  names a registry is never rewritten — using Docker's own rule for what counts
+  as a host — so a service pinned to `quay.io/team/api:1` keeps it and no
+  opt-out flag is needed. Unset leaves every image exactly as written.
+
 - `.github/workflows/release.yml`: a `workflow_dispatch` release, from `main`
   only, that cuts the next RELEASE version and publishes the package — the
   multi-arch image, the Helm chart, `install.yaml`, the CRD on its own, and a
@@ -26,6 +33,37 @@ All notable changes to this project are documented here. The format follows
   been *started* rather than services that work — a database still starting up,
   or one about to crash, counted as ready. Omitting the field leaves behaviour
   unchanged.
+- `DevEnvironment` CRD (`devenv.aviture.dev/v1alpha1`) for declaring isolated
+  dev environments: namespace, shared storage, supporting services, injected
+  config and secrets.
+- Reconciler that provisions the namespace, a ConfigMap, copies of referenced
+  Secrets, an optional PVC, and a Deployment plus ClusterIP Service per
+  service; prunes resources dropped from the spec; and tears the namespace down
+  via a finalizer on delete.
+- Safety check that refuses to adopt or delete a namespace the operator did not
+  create.
+- Helm chart (`charts/kado-operator`) with RBAC, leader election, metrics
+  service and optional ServiceMonitor.
+- Test suite across three layers: fake-client unit tests, envtest specs
+  covering the generated CRD schema, and a K3D integration suite behind the
+  `integration` build tag.
+- GitHub Actions for CI (lint, generated-file drift, tests, image build and
+  push), integration tests on an ephemeral cluster, and tagged releases that
+  publish a multi-arch image and the chart to Docker Hub under `partofaplan`.
+- Multi-arch (`linux/amd64`, `linux/arm64`) images. Each publish pushes the
+  immutable version tag and moves `latest` to it.
+- Dockerfile builder stage pinned to `$BUILDPLATFORM`, so multi-arch builds
+  cross-compile natively instead of emulating the toolchain under QEMU. This
+  removes the need for kubebuilder's generated `Dockerfile.cross` workaround.
+- `test-only` and `test-integration-only` Makefile targets: the same suites
+  without the code-generation prerequisites, for CI, where a separate job
+  already regenerates and diffs those files.
+- Makefile targets that act on the current kubectl context
+  (`test-integration`, `install`, `run`, `helm-crds`, `helm-lint`, `clean`),
+  plus optional local-cluster helpers (`cluster-up`, `cluster-down`,
+  `cluster-load`, `test-integration-local`) selectable with
+  `LOCAL_PROVIDER=k3d|kind|minikube`.
+
 
 ### Changed
 
@@ -107,38 +145,5 @@ All notable changes to this project are documented here. The format follows
 - `.claude/SKILL.MD` rewritten so each rule and rationale is stated exactly
   once, and so it links to `Makefile` and `.github/workflows/ci.yml` rather
   than embedding copies that had already drifted from them.
-
-### Added
-
-- `DevEnvironment` CRD (`devenv.aviture.dev/v1alpha1`) for declaring isolated
-  dev environments: namespace, shared storage, supporting services, injected
-  config and secrets.
-- Reconciler that provisions the namespace, a ConfigMap, copies of referenced
-  Secrets, an optional PVC, and a Deployment plus ClusterIP Service per
-  service; prunes resources dropped from the spec; and tears the namespace down
-  via a finalizer on delete.
-- Safety check that refuses to adopt or delete a namespace the operator did not
-  create.
-- Helm chart (`charts/kado-operator`) with RBAC, leader election, metrics
-  service and optional ServiceMonitor.
-- Test suite across three layers: fake-client unit tests, envtest specs
-  covering the generated CRD schema, and a K3D integration suite behind the
-  `integration` build tag.
-- GitHub Actions for CI (lint, generated-file drift, tests, image build and
-  push), integration tests on an ephemeral cluster, and tagged releases that
-  publish a multi-arch image and the chart to Docker Hub under `partofaplan`.
-- Multi-arch (`linux/amd64`, `linux/arm64`) images. Each publish pushes the
-  immutable version tag and moves `latest` to it.
-- Dockerfile builder stage pinned to `$BUILDPLATFORM`, so multi-arch builds
-  cross-compile natively instead of emulating the toolchain under QEMU. This
-  removes the need for kubebuilder's generated `Dockerfile.cross` workaround.
-- `test-only` and `test-integration-only` Makefile targets: the same suites
-  without the code-generation prerequisites, for CI, where a separate job
-  already regenerates and diffs those files.
-- Makefile targets that act on the current kubectl context
-  (`test-integration`, `install`, `run`, `helm-crds`, `helm-lint`, `clean`),
-  plus optional local-cluster helpers (`cluster-up`, `cluster-down`,
-  `cluster-load`, `test-integration-local`) selectable with
-  `LOCAL_PROVIDER=k3d|kind|minikube`.
 
 [Unreleased]: https://github.com/partofaplan/kado-operator/compare/main...develop
