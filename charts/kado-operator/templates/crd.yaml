@@ -107,7 +107,8 @@ spec:
                 description: |-
                   registry is the image registry, optionally with a namespace path, that
                   service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
-                  `registry.internal:5000/mirror`. No scheme, no trailing slash.
+                  `registry.internal:5000/mirror`. No scheme, no trailing slash, and a
+                  port, if given, must be between 1 and 65535.
 
                   It is prefixed onto a service image that does not already name a
                   registry of its own, so `redis:7-alpine` becomes
@@ -118,17 +119,6 @@ spec:
 
                   Leave unset for the default: each image reference is used exactly as
                   written, which for a bare name means Docker Hub.
-                  The port alternation reads as 1-65535, longest form first: 65530-65535,
-                  65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999. It is
-                  not pretty, but `[0-9]{1,5}` admitted `:0` and `:99999`, and neither is
-                  a TCP port — they failed at pull time, which is the failure this field's
-                  validation exists to prevent (#21).
-
-                  It lives in the pattern rather than a CEL rule because a CEL rule on a
-                  field inside the unbounded services array blows the schema's cost
-                  budget: the API server rejected the CRD outright. Bounding the array
-                  just to afford the rule would impose a service-count limit as a side
-                  effect of a port check.
                 maxLength: 255
                 pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
                 type: string
@@ -361,7 +351,8 @@ spec:
                       description: |-
                         registry is the image registry, optionally with a namespace path, that
                         service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
-                        `registry.internal:5000/mirror`. No scheme, no trailing slash.
+                        `registry.internal:5000/mirror`. No scheme, no trailing slash, and a
+                        port, if given, must be between 1 and 65535.
 
                         It is prefixed onto a service image that does not already name a
                         registry of its own, so `redis:7-alpine` becomes
@@ -373,17 +364,6 @@ spec:
                         Overrides spec.registry for this service alone. Leave unset to inherit
                         it; there is no need to opt out, because an image that names its own
                         registry is never rewritten.
-                        The port alternation reads as 1-65535, longest form first: 65530-65535,
-                        65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999. It is
-                        not pretty, but `[0-9]{1,5}` admitted `:0` and `:99999`, and neither is
-                        a TCP port — they failed at pull time, which is the failure this field's
-                        validation exists to prevent (#21).
-
-                        It lives in the pattern rather than a CEL rule because a CEL rule on a
-                        field inside the unbounded services array blows the schema's cost
-                        budget: the API server rejected the CRD outright. Bounding the array
-                        just to afford the rule would impose a service-count limit as a side
-                        effect of a port check.
                       maxLength: 255
                       pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
                       type: string

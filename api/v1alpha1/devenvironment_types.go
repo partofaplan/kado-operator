@@ -83,9 +83,28 @@ type ServiceSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
 
+	// The port alternation in the pattern below reads as 1-65535: 65530-65535,
+	// 65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999.
+	// `[0-9]{1,5}` let `:0` and `:99999` through to fail at pull time, which
+	// is the failure this validation exists to prevent (#21). Only the
+	// canonical spelling passes — `:0080` is rejected even though Docker's
+	// grammar allows it and Go resolves it to 80.
+	//
+	// A CEL rule would read better and was tried first. It is affordable on
+	// the environment-level field but not on the per-service one, which sits
+	// inside the unbounded services array: there the cost estimator rejected
+	// the CRD outright. Bounding that array to afford the rule would impose a
+	// service-count limit as a side effect of a port check. Both fields keep
+	// the same pattern so neither can drift.
+	//
+	// Deliberately NOT part of the doc comment below: controller-gen folds
+	// that into the CRD description, and `kubectl explain` should not carry
+	// regex construction notes.
+
 	// registry is the image registry, optionally with a namespace path, that
 	// service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
-	// `registry.internal:5000/mirror`. No scheme, no trailing slash.
+	// `registry.internal:5000/mirror`. No scheme, no trailing slash, and a
+	// port, if given, must be between 1 and 65535.
 	//
 	// It is prefixed onto a service image that does not already name a
 	// registry of its own, so `redis:7-alpine` becomes
@@ -99,17 +118,6 @@ type ServiceSpec struct {
 	// registry is never rewritten.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
-	// The port alternation reads as 1-65535, longest form first: 65530-65535,
-	// 65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999. It is
-	// not pretty, but `[0-9]{1,5}` admitted `:0` and `:99999`, and neither is
-	// a TCP port — they failed at pull time, which is the failure this field's
-	// validation exists to prevent (#21).
-	//
-	// It lives in the pattern rather than a CEL rule because a CEL rule on a
-	// field inside the unbounded services array blows the schema's cost
-	// budget: the API server rejected the CRD outright. Bounding the array
-	// just to afford the rule would impose a service-count limit as a side
-	// effect of a port check.
 	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
 	Registry string `json:"registry,omitempty"`
 
@@ -205,9 +213,28 @@ type DevEnvironmentSpec struct {
 	// +optional
 	Storage *StorageSpec `json:"storage,omitempty"`
 
+	// The port alternation in the pattern below reads as 1-65535: 65530-65535,
+	// 65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999.
+	// `[0-9]{1,5}` let `:0` and `:99999` through to fail at pull time, which
+	// is the failure this validation exists to prevent (#21). Only the
+	// canonical spelling passes — `:0080` is rejected even though Docker's
+	// grammar allows it and Go resolves it to 80.
+	//
+	// A CEL rule would read better and was tried first. It is affordable on
+	// the environment-level field but not on the per-service one, which sits
+	// inside the unbounded services array: there the cost estimator rejected
+	// the CRD outright. Bounding that array to afford the rule would impose a
+	// service-count limit as a side effect of a port check. Both fields keep
+	// the same pattern so neither can drift.
+	//
+	// Deliberately NOT part of the doc comment below: controller-gen folds
+	// that into the CRD description, and `kubectl explain` should not carry
+	// regex construction notes.
+
 	// registry is the image registry, optionally with a namespace path, that
 	// service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
-	// `registry.internal:5000/mirror`. No scheme, no trailing slash.
+	// `registry.internal:5000/mirror`. No scheme, no trailing slash, and a
+	// port, if given, must be between 1 and 65535.
 	//
 	// It is prefixed onto a service image that does not already name a
 	// registry of its own, so `redis:7-alpine` becomes
@@ -220,17 +247,6 @@ type DevEnvironmentSpec struct {
 	// written, which for a bare name means Docker Hub.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
-	// The port alternation reads as 1-65535, longest form first: 65530-65535,
-	// 65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999. It is
-	// not pretty, but `[0-9]{1,5}` admitted `:0` and `:99999`, and neither is
-	// a TCP port — they failed at pull time, which is the failure this field's
-	// validation exists to prevent (#21).
-	//
-	// It lives in the pattern rather than a CEL rule because a CEL rule on a
-	// field inside the unbounded services array blows the schema's cost
-	// budget: the API server rejected the CRD outright. Bounding the array
-	// just to afford the rule would impose a service-count limit as a side
-	// effect of a port check.
 	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
 	Registry string `json:"registry,omitempty"`
 
