@@ -796,6 +796,22 @@ func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *de
 		}
 	}
 
+	// A pod that is Running but never Ready has nothing wrong with it to
+	// report: no waiting reason, no failed scheduling — it simply never
+	// answers its probe, so the loop above finds nothing and the environment
+	// sits in Provisioning forever (#15).
+	//
+	// Kubernetes already times exactly this. A Deployment that has not
+	// advanced ReadyReplicas within progressDeadlineSeconds — ten minutes by
+	// default — reports Progressing=False with reason ProgressDeadlineExceeded.
+	// Reading that costs no elapsed-time state of our own, and it is the same
+	// clock a person would consult.
+	//
+	// Only for services the pod pass said nothing about: a container in
+	// CrashLoopBackOff trips the deadline too, and "it crashed" explains more
+	// than "it timed out".
+	r.addStalledServices(ctx, env, ns, byService)
+
 	// Emitted in spec order rather than by ranging the map, so the message is
 	// byte-identical across reconciles by construction. Go randomises map
 	// iteration, which would otherwise reshuffle the message on every pass —
@@ -807,6 +823,57 @@ func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *de
 		}
 	}
 	return out
+}
+
+// addStalledServices records services whose Deployment has blown its progress
+// deadline, for any service that does not already have a more specific problem.
+//
+// Listing failures are logged and skipped rather than surfaced: this adds
+// detail to a status that is already being written, and losing the detail is
+// better than failing the reconcile over it — the same call the pod listing
+// above makes.
+func (r *DevEnvironmentReconciler) addStalledServices(
+	ctx context.Context,
+	env *devenvv1alpha1.DevEnvironment,
+	ns string,
+	byService map[string]string,
+) {
+	var deploys appsv1.DeploymentList
+	if err := r.reader().List(ctx, &deploys,
+		client.InNamespace(ns),
+		client.MatchingLabels{labelManagedBy: managerName, labelEnvironment: env.Name},
+	); err != nil {
+		logf.FromContext(ctx).Error(err, "listing deployments for status detail", "namespace", ns)
+		return
+	}
+
+	for i := range deploys.Items {
+		d := &deploys.Items[i]
+		svc := d.Labels[labelService]
+		if svc == "" || byService[svc] != "" {
+			continue
+		}
+		if !progressDeadlineExceeded(d) {
+			continue
+		}
+		byService[svc] = "Stalled: no replica became ready within the deployment's " +
+			"progress deadline; the container is running but not passing its " +
+			"readinessProbe — check that something listens on the service port"
+	}
+}
+
+// progressDeadlineExceeded reports whether the Deployment controller has given
+// up waiting for this rollout.
+func progressDeadlineExceeded(d *appsv1.Deployment) bool {
+	for i := range d.Status.Conditions {
+		c := &d.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentProgressing &&
+			c.Status == corev1.ConditionFalse &&
+			c.Reason == "ProgressDeadlineExceeded" {
+			return true
+		}
+	}
+	return false
 }
 
 // podProblem describes why a pod cannot run, or returns "" if it is healthy or
