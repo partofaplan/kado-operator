@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The chart derives `image.pullPolicy` from the tag instead of always sending
+  `IfNotPresent`: `Always` for the literal `latest`, `IfNotPresent` otherwise.
+  The chart's own appVersion is `latest`, so a default install previously
+  installed a moving tag with caching on, and a node holding an older `latest`
+  kept running it while `helm upgrade` reported success. Setting
+  `image.pullPolicy` explicitly still overrides, which side-loading relies on.
+
 - `spec.imagePullSecrets` and `spec.services[].imagePullSecrets`: authenticate
   to a private registry. Names docker-registry Secrets in the `DevEnvironment`'s
   own namespace, which are copied into the environment namespace alongside

@@ -59,9 +59,14 @@ the tag", which is what Kubernetes itself does for a bare pod spec.
 
 This matters because the chart's own appVersion is "latest" (#18). A moving tag
 with IfNotPresent means a node that already cached an older "latest" keeps
-running it, and `helm upgrade` reports success while changing nothing. Always
-for a moving tag, IfNotPresent for an immutable one — the same rule deploy.yml
-applies to the dispatched path.
+running it, and `helm upgrade` reports success while changing nothing.
+
+The rule is Kubernetes' own — the literal string "latest" — and deliberately
+not a general moving-tag detector. Nothing in an image reference says whether a
+tag moves: a `dev` tag pushed to a registry wants Always, while the same `dev`
+tag side-loaded onto a node wants Never, and the chart cannot tell those apart.
+Anything other than "latest" therefore needs an explicit image.pullPolicy, and
+the side-load flow in docs/development.md sets Never for exactly this reason.
 */}}
 {{- define "kado-operator.pullPolicy" -}}
 {{- if .Values.image.pullPolicy -}}
