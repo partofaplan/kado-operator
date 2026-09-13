@@ -183,12 +183,21 @@ byte-identical image.
 Anything else is code — including `.github/**` and `charts/**`. A change that
 touches docs *and* code runs everything.
 
-The filter deliberately **fails open**. The four gated jobs are required checks
-on `develop` and `enforce_admins` is on, so a job that never runs would leave a
-check pending forever and the PR unmergeable, with no override. A job skipped by
-`if:` reports as skipped and satisfies the check instead. So anything ambiguous
-— no base ref, a SHA the clone does not hold, an empty diff — runs the full
-pipeline. The cost of being wrong is one wasted run, never a stuck PR.
+The filter deliberately **fails open**, in two directions. Four of the five
+gated jobs — every one but `integration` — are required checks on `develop`, and
+`enforce_admins` is on.
+
+A job that never runs leaves its check pending forever and the PR unmergeable
+with no override, which is why this is a job-level `if:` and not `paths-ignore`.
+But a job *skipped* by `if:` reports as skipped, and a skipped job **satisfies**
+a required check — so the gate must never skip on anything but a definite
+answer. The condition is `!cancelled() && ... != 'false'` rather than
+`== 'true'`: without it, a `changes` job that *failed* would skip every gated
+job and let a code change merge with nothing having run.
+
+The script fails open for the same reason: anything ambiguous — no base ref, a
+SHA the clone does not hold, an empty diff — runs the full pipeline. The cost of
+being wrong is one wasted run, never a stuck PR and never an unchecked merge.
 
 ## The local loop
 

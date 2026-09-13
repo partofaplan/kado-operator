@@ -260,8 +260,10 @@ Every referenced Secret is copied, including ones only some services use. An
 unused copy is harmless, and the alternative — working out which secrets survive
 resolution — would mean the set changed whenever a service was added.
 
-**The Secret must be of type `kubernetes.io/dockerconfigjson`.** Anything else
-is rejected during reconcile, with the reason in the environment's conditions.
+**The Secret must be of type `kubernetes.io/dockerconfigjson`** (or the legacy
+`kubernetes.io/dockercfg` — both are what the kubelet itself accepts). Anything
+else is rejected during reconcile, with the reason in the environment's
+conditions.
 Kubernetes itself accepts a wrong-typed Secret here and then silently ignores
 it, so the only symptom would otherwise be an `ImagePullBackOff` that looks
 exactly like a bad password.
@@ -327,7 +329,7 @@ kubectl describe devenvironment team-alpha
 | --- | --- |
 | `Degraded=True`, "not managed by this DevEnvironment" | The target namespace already exists and belongs to something else. Pick a different `namespaceName`. |
 | `Degraded=True`, "reading source secret" | A name in `secretRefs` or `imagePullSecrets` does not exist in the `DevEnvironment`'s own namespace. |
-| `Degraded=True`, "named in imagePullSecrets but has type" | The Secret exists but is not `kubernetes.io/dockerconfigjson`. Recreate it with `kubectl create secret docker-registry`. |
+| `Degraded=True`, "named in imagePullSecrets but has type" | The Secret exists but is not a docker-registry Secret. Recreate it with `kubectl create secret docker-registry`. |
 | `Degraded=True`, reason `WorkloadUnhealthy` | A container cannot start. The message names the service, the blocking reason (`CrashLoopBackOff`, `ImagePullBackOff`, `Unschedulable`, …), the last exit code and the `kubectl logs` command that shows why. A missing required env var — `POSTGRES_PASSWORD`, say — lands here. |
 | Stuck at `Provisioning` with `Degraded=False` | Pods are running but not ready. Nothing is *blocked*, so this is not degraded: check image pull times, whether a PVC is waiting for a consumer (a volume no service mounts stays `Pending` forever), and whether a `readinessProbe` is pointed at a port nothing serves. A probe that never passes will sit here indefinitely — `kubectl describe pod -n <env>` shows the failing probe. |
 | Stuck deleting | The namespace is still terminating, usually a finalizer on something inside it. `kubectl get ns <env> -o yaml`. |

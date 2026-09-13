@@ -42,11 +42,25 @@ jobs:
       # reach `version` burns a release number on a byte-identical image and
       # redeploys picard for a typo.
       #
-      # Every gated job is a *required* check on develop, so this must never
-      # fail closed: a job skipped by `if:` reports as skipped and satisfies
-      # the requirement, but a job that never runs at all leaves the check
-      # pending forever and the PR unmergeable (enforce_admins is on, so there
-      # is no override). Anything ambiguous therefore sets code=true.
+      # Every gated job is a *required* check on develop, and a job skipped by
+      # `if:` reports as skipped, which SATISFIES a required check. That cuts
+      # both ways, so the gate has to be wrong in the safe direction twice:
+      #
+      #   - Never leave a check unreported: `paths-ignore` would skip the
+      #     workflow entirely, leaving required checks pending forever and the
+      #     PR unmergeable, with no override (enforce_admins is on).
+      #   - Never skip on anything but a definite answer: the gating `if:` uses
+      #     `always() && ... != 'false'`, not `== 'true'`. Without `always()` a
+      #     *failed* changes job (runner, checkout, git) skips every gated job,
+      #     and skipped satisfies the requirement — so a code change could merge
+      #     with lint, codegen, tests and the image build never having run.
+      #     Only an explicit code=false skips anything. `!cancelled()` rather
+      #     than `always()`: this workflow cancels superseded PR runs on
+      #     purpose, and `always()` would run these jobs through a cancellation
+      #     and keep spinning up the integration cluster.
+      #
+      # The script below fails open for the same reason: anything ambiguous
+      # sets code=true.
       - id: filter
         name: Decide whether this is a docs-only change
         env:
@@ -97,7 +111,7 @@ jobs:
   lint:
     name: Lint
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -122,7 +136,7 @@ jobs:
   generated:
     name: Generated code is up to date
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -168,7 +182,7 @@ jobs:
   test:
     name: Unit & envtest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -223,7 +237,7 @@ jobs:
   image:
     name: Image builds
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -276,7 +290,7 @@ jobs:
     # now reaches develop before anything catches it, so `version` is gated on
     # this job and no version is cut until it passes.
     needs: changes
-    if: github.event_name == 'push' && needs.changes.outputs.code == 'true'
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
