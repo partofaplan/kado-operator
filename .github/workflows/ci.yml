@@ -92,7 +92,13 @@ jobs:
           git cat-file -e "${base}^{commit}" 2>/dev/null || full "base ${base} not in this clone"
           git cat-file -e "${head}^{commit}" 2>/dev/null || full "head ${head} not in this clone"
 
-          files="$(git diff --name-only "${base}" "${head}")"
+          # --no-renames is load-bearing. With rename detection on, git prints
+          # only a rename's DESTINATION, so `git mv internal/foo.go
+          # docs/foo.md` reports just `docs/foo.md` — the diff reads as
+          # documentation and every gated job is skipped, which satisfies the
+          # required checks. A build-breaking change would merge with nothing
+          # having run. Listing both sides keeps the source path visible.
+          files="$(git diff --no-renames --name-only "${base}" "${head}")"
           [ -n "${files}" ] || full "empty diff ${base}..${head}"
 
           echo "changed files:"
