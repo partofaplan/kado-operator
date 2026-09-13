@@ -167,6 +167,29 @@ gh issue close <n> -c "Fixed in #<pr>, merged to \`develop\`."
 The keyword firing again at promotion is harmless — closing an already-closed
 issue is a no-op.
 
+## Documentation-only changes skip the pipeline
+
+A change that touches only `docs/**`, any `*.md` or `LICENSE` runs no build,
+no tests and no release. `ci.yml` classifies the diff in a `changes` job and
+gates `lint`, `generated`, `test`, `image` and `integration` on the result;
+`version` needs all five, so `version`, `publish` and `verify-picard` skip with
+it. Nothing is published and picard is not touched.
+
+That is safe because documentation reaches neither artifact: the Dockerfile
+copies `go.mod`, `go.sum`, `cmd`, `api` and `internal`, and the chart ships only
+its own templates. A docs-only release would be a new version number on a
+byte-identical image.
+
+Anything else is code — including `.github/**` and `charts/**`. A change that
+touches docs *and* code runs everything.
+
+The filter deliberately **fails open**. The four gated jobs are required checks
+on `develop` and `enforce_admins` is on, so a job that never runs would leave a
+check pending forever and the PR unmergeable, with no override. A job skipped by
+`if:` reports as skipped and satisfies the check instead. So anything ambiguous
+— no base ref, a SHA the clone does not hold, an empty diff — runs the full
+pipeline. The cost of being wrong is one wasted run, never a stuck PR.
+
 ## The local loop
 
 Everything here acts on the **current kubectl context**. The operator is
