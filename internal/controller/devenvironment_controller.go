@@ -294,6 +294,22 @@ func (r *DevEnvironmentReconciler) reconcileSecrets(ctx context.Context, env *de
 			)
 		}
 
+		// Secret.type is immutable, so an existing copy whose type no longer
+		// matches the source can never be updated into agreement — every
+		// reconcile from then on fails with "field is immutable" and the
+		// environment stays Failed forever. Worse, the error names a Secret in
+		// the environment namespace that the user never created, so the
+		// obvious fixes (editing or recreating the *source*) all appear to do
+		// nothing.
+		//
+		// Replacing it is safe: the copy is wholly owned by this operator and
+		// holds nothing the source does not. Reachable whenever a Secret is
+		// repurposed — notably when one named in imagePullSecrets is recreated
+		// as dockerconfigjson after being rejected for its type (#48).
+		if err := r.replaceOnTypeChange(ctx, name, ns, src.Type); err != nil {
+			return err
+		}
+
 		dst := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
 		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dst, func() error {
 			dst.Labels = r.labels(env, "")
@@ -304,6 +320,32 @@ func (r *DevEnvironmentReconciler) reconcileSecrets(ctx context.Context, env *de
 		if err != nil {
 			return fmt.Errorf("copying secret %q: %w", name, err)
 		}
+	}
+	return nil
+}
+
+// replaceOnTypeChange deletes an already-copied Secret whose type differs from
+// the source's, so the copy can be recreated with the new type. A no-op when
+// there is no copy yet or its type already agrees.
+func (r *DevEnvironmentReconciler) replaceOnTypeChange(
+	ctx context.Context, name, ns string, want corev1.SecretType,
+) error {
+	var existing corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &existing)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading copied secret %q: %w", name, err)
+	}
+	if existing.Type == want {
+		return nil
+	}
+	// No finalizers on a Secret, so the delete completes before the create
+	// below runs. A NotFound here means something else removed it first, which
+	// is the state we wanted anyway.
+	if err := r.Delete(ctx, &existing); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("replacing secret %q after its type changed to %q: %w", name, want, err)
 	}
 	return nil
 }

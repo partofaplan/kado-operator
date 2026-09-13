@@ -81,6 +81,14 @@ All notable changes to this project are documented here. The format follows
   `LOCAL_PROVIDER=k3d|kind|minikube`.
 
 
+### Fixed
+
+- A Secret named in `secretRefs` or `imagePullSecrets` whose **type** changed
+  left the environment permanently `Failed`. The copy in the environment
+  namespace could not be updated — `Secret.type` is immutable — so every
+  reconcile failed with `field is immutable`, naming a Secret the user never
+  created. The copy is now replaced when the source's type changes.
+
 ### Changed
 
 - The Helm chart is distributed as a GitHub release asset rather than pushed to

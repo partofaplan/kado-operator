@@ -250,6 +250,51 @@ var _ = Describe("DevEnvironment", func() {
 		Expect(checked).To(BeNumerically(">=", 6), "expected to validate every example manifest")
 	})
 
+	// Against the real API server, not the fake client: Secret.type immutability
+	// is enforced by the API server, and the fake client happily rewrites it —
+	// so a unit test here would pass whether or not the bug existed (#48).
+	It("replaces a copied Secret when the source's type changes", func() {
+		name := uniqueName()
+		env := newResource(name)
+		env.Spec.Services[0].SecretRefs = []string{"creds"}
+		Expect(k8sClient.Create(ctx, env)).To(Succeed())
+
+		src := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "default"},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"PASSWORD": []byte("hunter2")},
+		}
+		Expect(k8sClient.Create(ctx, src)).To(Succeed())
+
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+
+		r := &DevEnvironmentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), APIReader: k8sClient}
+		Expect(r.reconcileSecrets(ctx, env, name)).To(Succeed())
+
+		var copied corev1.Secret
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "creds", Namespace: name}, &copied)).To(Succeed())
+		Expect(copied.Type).To(Equal(corev1.SecretTypeOpaque))
+
+		// Repurpose the source as a registry credential — the sequence the
+		// imagePullSecrets type check pushes people into.
+		Expect(k8sClient.Delete(ctx, src)).To(Succeed())
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "default"},
+			Type:       corev1.SecretTypeDockerConfigJson,
+			Data:       map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)},
+		})).To(Succeed())
+
+		// Without the replace this fails with `type: field is immutable`, and
+		// keeps failing on every reconcile thereafter.
+		Expect(r.reconcileSecrets(ctx, env, name)).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "creds", Namespace: name}, &copied)).To(Succeed())
+		Expect(copied.Type).To(Equal(corev1.SecretTypeDockerConfigJson))
+		Expect(copied.Data).To(HaveKey(".dockerconfigjson"))
+		Expect(copied.Data).NotTo(HaveKey("PASSWORD"), "stale data from the old copy")
+	})
+
 	It("provisions a namespace, deployment and service", func() {
 		name := uniqueName()
 		env := newResource(name)
