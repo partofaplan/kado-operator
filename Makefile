@@ -1,5 +1,16 @@
 # Image coordinates. Images are published to Docker Hub under partofaplan:
 # https://hub.docker.com/repositories/partofaplan
+#
+# IMAGE_TAG stays `latest` deliberately (#18). IMG names both what `deploy`
+# installs AND what `docker-build`/`docker-push` produce, so defaulting it to
+# the newest published version would make a local build tag itself with a
+# released version and a push overwrite that release.
+#
+# The moving tag is safe on this path: `config/manager` sets no
+# imagePullPolicy, and Kubernetes defaults that to Always for `:latest` and
+# IfNotPresent for anything else — exactly the rule we want. Override with
+# `make deploy IMAGE_TAG=1.1.0` to pin. The chart derives the same rule
+# explicitly, because Helm has to render a value.
 REGISTRY   ?= docker.io
 IMAGE_NAME ?= partofaplan/kado-operator
 IMAGE_TAG  ?= latest

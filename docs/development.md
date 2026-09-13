@@ -310,6 +310,13 @@ helm upgrade --install kado-operator ./charts/kado-operator \
 kubectl -n kado-operator-system logs -f deploy/kado-operator
 ```
 
+`image.pullPolicy` is set explicitly there because a side-loaded image must
+never be fetched. Left unset, the chart derives it from the tag the way
+Kubernetes does for a bare pod spec — `Always` for the moving `latest`,
+`IfNotPresent` for an immutable version (#18). That is what stops a node with an
+older `latest` cached from quietly keeping it while `helm upgrade` reports
+success.
+
 On a remote cluster there is nothing to side-load — push the image and let the
 cluster pull it:
 

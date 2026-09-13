@@ -2,7 +2,10 @@ image:
   repository: docker.io/partofaplan/kado-operator
   # Defaults to the chart's appVersion when empty.
   tag: ""
-  pullPolicy: IfNotPresent
+  # Empty derives it from the tag, as Kubernetes does for a bare pod spec:
+  # Always for the moving "latest", IfNotPresent for an immutable version. Set
+  # it to override that.
+  pullPolicy: ""
 
 imagePullSecrets: []
 nameOverride: ""
