@@ -514,9 +514,10 @@ jobs:
       RELEASE: kado-operator
       V: ${{ needs.version.outputs.version }}
     steps:
-      # A self-hosted runner reuses its workspace, so the default would leave
-      # GITHUB_TOKEN in .git/config on a physical machine. Nothing here needs
-      # git auth.
+      # A self-hosted runner reuses its workspace, so the default leaves a
+      # usable GITHUB_TOKEN behind on a physical machine between jobs — in a
+      # RUNNER_TEMP credential file since checkout v6, in .git/config before
+      # that. Nothing here needs git auth either way.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
