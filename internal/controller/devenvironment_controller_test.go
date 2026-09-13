@@ -943,6 +943,10 @@ func TestStalledReportsReplicaFailureRatherThanGuessingAtTheProbe(t *testing.T) 
 	// no pod to inspect. Claiming a readinessProbe problem there would bury
 	// the real reason.
 	blocked := stalledDeployment()
+	// Zero, because that is the whole problem: the ReplicaSet cannot create a
+	// pod. The previous fixture said 1, a state this failure cannot reach, and
+	// so passed while the real case was suppressed.
+	blocked.Status.UpdatedReplicas = 0
 	blocked.Status.Conditions = append(blocked.Status.Conditions, appsv1.DeploymentCondition{
 		Type:    appsv1.DeploymentReplicaFailure,
 		Status:  corev1.ConditionTrue,

@@ -345,7 +345,7 @@ helm upgrade --install kado-operator ./charts/kado-operator \
 kubectl -n kado-operator-system logs -f deploy/kado-operator
 ```
 
-Both `--set` values there are load-bearing. `pullPolicy=Never` because a
+The `image.tag` and `image.pullPolicy` values there are load-bearing. `pullPolicy=Never` because a
 side-loaded image must never be fetched — **side-loading always needs it**, and
 with the default `IMAGE_TAG=latest` it is required, since the chart would
 otherwise pull the registry's `latest` straight over the image you just built.
