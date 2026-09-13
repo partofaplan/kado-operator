@@ -186,8 +186,10 @@ func TestReconcileSetsFSGroupOnlyOnServicesThatMountTheVolume(t *testing.T) {
 }
 
 func TestReconcileLeavesSecurityContextUnsetWithoutFSGroup(t *testing.T) {
-	// nil rather than an empty struct: an empty one round-trips as nil and
-	// would rewrite the pod template on every reconcile.
+	// Asserts nil, which holds here only because the fake client does no
+	// defaulting — a real API server stores `securityContext: {}`. The point
+	// of the assertion is that we set no fsGroup, not that the stored form is
+	// nil.
 	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
 		e.Spec.Storage = &devenvv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}
 		e.Spec.Services[0].MountPath = testMountPath

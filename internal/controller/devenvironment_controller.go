@@ -598,9 +598,13 @@ func readinessProbe(spec *devenvv1alpha1.ServiceSpec) *corev1.Probe {
 // makes, so a service can never get the group without the volume or the other
 // way round.
 //
-// Returns nil rather than an empty struct when there is nothing to say, so the
-// pod template matches what the API server stores and does not churn a rollout
-// on every reconcile.
+// Returns nil when there is nothing to say. Note the API server defaults the
+// field and stores `securityContext: {}` either way, so this does not make the
+// local object match the stored one — CreateOrUpdate issues an Update on every
+// reconcile regardless, as it already did before this field existed, because
+// the mutate rebuilds Containers from scratch each pass. The server treats it
+// as a no-op: resourceVersion and generation do not move, and no rollout
+// happens. nil is simply the honest way to say "unset".
 func podSecurityContext(
 	env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec,
 ) *corev1.PodSecurityContext {

@@ -297,13 +297,18 @@ spec:
 ```
 
 Kubernetes then chowns the volume to `root:<fsGroup>`, sets the group-write and
-setgid bits, and adds the GID to the container's supplementary groups. Verified
-behaviour, with and without the field:
+setgid bits, and adds the GID to the container's supplementary groups. Measured
+inside the container on a k3s cluster, with and without the field:
 
 | | pod `securityContext` | volume |
 | --- | --- | --- |
 | `fsGroup: 65534` | `{"fsGroup":65534}` | `owner=0 group=65534 mode=2777` |
 | unset | none | `owner=0 group=0 mode=777` |
+
+The `group` column is the part that matters. The `777` on the unset row is k3s
+`local-path` being permissive — that is why a non-root image appears to work
+there. A provisioner that presents `root:root 0755` gives the same `group=0`
+with no group write, and the container cannot write at all.
 
 Without it the volume is presented as the provisioner leaves it. That is
 `root:root 0755` on most CSI drivers, EBS and GCE PD, and a non-root process
