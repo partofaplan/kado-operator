@@ -255,6 +255,23 @@ func TestReconcileServicePullSecretsReplaceTheEnvironments(t *testing.T) {
 	assert.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "env-creds", Namespace: targetNS}, &copied))
 }
 
+func TestReconcileTreatsAnEmptyServicePullSecretListAsInherit(t *testing.T) {
+	// A templated manifest that renders `imagePullSecrets: []` must not
+	// silently drop the environment's credentials into an ImagePullBackOff.
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"env-creds"}
+		e.Spec.Services[0].ImagePullSecrets = []string{}
+	}), dockerCfg("env-creds"))
+	reconcile(t, r)
+
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	assert.Equal(t,
+		[]corev1.LocalObjectReference{{Name: "env-creds"}},
+		deploy.Spec.Template.Spec.ImagePullSecrets,
+	)
+}
+
 func TestReconcileLeavesPullSecretsUnsetWhenNoneAreNamed(t *testing.T) {
 	// nil rather than an empty slice: an empty slice round-trips through the
 	// API server as nil and would rewrite the pod template every reconcile.
