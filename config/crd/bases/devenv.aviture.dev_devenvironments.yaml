@@ -65,6 +65,26 @@ spec:
                   config is injected into the environment namespace as a ConfigMap named
                   "<environment>-config" and exposed to every service via envFrom.
                 type: object
+              imagePullSecrets:
+                description: |-
+                  imagePullSecrets names docker-registry Secrets in the DevEnvironment's
+                  own namespace used to authenticate when pulling service images. They are
+                  copied into the environment namespace, because a pod cannot reference a
+                  Secret in another namespace.
+
+                  Applies to every service that does not name its own. A service's list
+                  replaces this one rather than adding to it, matching how registry
+                  behaves.
+
+                  Each Secret must be of type kubernetes.io/dockerconfigjson or the legacy
+                  kubernetes.io/dockercfg; anything else is rejected during reconcile
+                  rather than becoming an ImagePullBackOff with no explanation.
+                items:
+                  maxLength: 253
+                  pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
+                  type: string
+                type: array
+                x-kubernetes-list-type: atomic
               namespaceName:
                 description: |-
                   namespaceName is the namespace provisioned for this environment. It
@@ -80,6 +100,24 @@ spec:
                 description: |-
                   owner identifies the person or team the environment belongs to. It is
                   stamped onto the namespace as a label for cost attribution.
+                type: string
+              registry:
+                description: |-
+                  registry is the image registry, optionally with a namespace path, that
+                  service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
+                  `registry.internal:5000/mirror`. No scheme, no trailing slash.
+
+                  It is prefixed onto a service image that does not already name a
+                  registry of its own, so `redis:7-alpine` becomes
+                  `<registry>/redis:7-alpine` while `quay.io/team/api:1` is left alone.
+                  That is the same rule Docker and Kubernetes use to decide whether the
+                  first path segment is a host, so a service that pins its own registry
+                  keeps it without needing to opt out.
+
+                  Leave unset for the default: each image reference is used exactly as
+                  written, which for a bare name means Docker Hub.
+                maxLength: 255
+                pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
                 type: string
               services:
                 description: services are the supporting services deployed into the
@@ -100,6 +138,31 @@ spec:
                       description: image is the container image to run.
                       minLength: 1
                       type: string
+                    imagePullSecrets:
+                      description: |-
+                        imagePullSecrets names docker-registry Secrets in the DevEnvironment's
+                        own namespace used to authenticate when pulling this service's image.
+                        They are copied into the environment namespace alongside secretRefs.
+
+                        Overrides spec.imagePullSecrets for this service alone — the same rule
+                        as registry, so a service that pins its own private registry names the
+                        credentials for it and does not inherit the environment's. Leave unset
+                        to inherit.
+
+                        An explicitly empty list inherits too, rather than clearing. That
+                        matches how an empty registry behaves and keeps a templated manifest
+                        that renders `imagePullSecrets: []` from silently dropping credentials
+                        and turning into an ImagePullBackOff.
+
+                        Each Secret must be of type kubernetes.io/dockerconfigjson or the legacy
+                        kubernetes.io/dockercfg; anything else is rejected during reconcile
+                        rather than becoming an ImagePullBackOff with no explanation.
+                      items:
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
                     mountPath:
                       description: |-
                         mountPath, when set, mounts the environment's shared volume into the
@@ -281,6 +344,25 @@ spec:
                           format: int32
                           type: integer
                       type: object
+                    registry:
+                      description: |-
+                        registry is the image registry, optionally with a namespace path, that
+                        service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
+                        `registry.internal:5000/mirror`. No scheme, no trailing slash.
+
+                        It is prefixed onto a service image that does not already name a
+                        registry of its own, so `redis:7-alpine` becomes
+                        `<registry>/redis:7-alpine` while `quay.io/team/api:1` is left alone.
+                        That is the same rule Docker and Kubernetes use to decide whether the
+                        first path segment is a host, so a service that pins its own registry
+                        keeps it without needing to opt out.
+
+                        Overrides spec.registry for this service alone. Leave unset to inherit
+                        it; there is no need to opt out, because an image that names its own
+                        registry is never rewritten.
+                      maxLength: 255
+                      pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
+                      type: string
                     replicas:
                       default: 1
                       description: replicas is the desired number of pods. Defaults

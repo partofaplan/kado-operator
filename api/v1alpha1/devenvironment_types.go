@@ -1,5 +1,5 @@
 /*
-Copyright 2026.
+Copyright 2026 Zach Perkins.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -83,6 +83,25 @@ type ServiceSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
 
+	// registry is the image registry, optionally with a namespace path, that
+	// service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
+	// `registry.internal:5000/mirror`. No scheme, no trailing slash.
+	//
+	// It is prefixed onto a service image that does not already name a
+	// registry of its own, so `redis:7-alpine` becomes
+	// `<registry>/redis:7-alpine` while `quay.io/team/api:1` is left alone.
+	// That is the same rule Docker and Kubernetes use to decide whether the
+	// first path segment is a host, so a service that pins its own registry
+	// keeps it without needing to opt out.
+	//
+	// Overrides spec.registry for this service alone. Leave unset to inherit
+	// it; there is no need to opt out, because an image that names its own
+	// registry is never rewritten.
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	Registry string `json:"registry,omitempty"`
+
 	// port is the container port exposed through the ClusterIP Service.
 	// +required
 	// +kubebuilder:validation:Minimum=1
@@ -105,6 +124,29 @@ type ServiceSpec struct {
 	// +optional
 	// +listType=atomic
 	SecretRefs []string `json:"secretRefs,omitempty"`
+
+	// imagePullSecrets names docker-registry Secrets in the DevEnvironment's
+	// own namespace used to authenticate when pulling this service's image.
+	// They are copied into the environment namespace alongside secretRefs.
+	//
+	// Overrides spec.imagePullSecrets for this service alone — the same rule
+	// as registry, so a service that pins its own private registry names the
+	// credentials for it and does not inherit the environment's. Leave unset
+	// to inherit.
+	//
+	// An explicitly empty list inherits too, rather than clearing. That
+	// matches how an empty registry behaves and keeps a templated manifest
+	// that renders `imagePullSecrets: []` from silently dropping credentials
+	// and turning into an ImagePullBackOff.
+	//
+	// Each Secret must be of type kubernetes.io/dockerconfigjson or the legacy
+	// kubernetes.io/dockercfg; anything else is rejected during reconcile
+	// rather than becoming an ImagePullBackOff with no explanation.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`
+	ImagePullSecrets []string `json:"imagePullSecrets,omitempty"`
 
 	// mountPath, when set, mounts the environment's shared volume into the
 	// container at this path. Requires spec.storage to be set.
@@ -151,6 +193,42 @@ type DevEnvironmentSpec struct {
 	// storage requests a shared PersistentVolumeClaim for the environment.
 	// +optional
 	Storage *StorageSpec `json:"storage,omitempty"`
+
+	// registry is the image registry, optionally with a namespace path, that
+	// service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
+	// `registry.internal:5000/mirror`. No scheme, no trailing slash.
+	//
+	// It is prefixed onto a service image that does not already name a
+	// registry of its own, so `redis:7-alpine` becomes
+	// `<registry>/redis:7-alpine` while `quay.io/team/api:1` is left alone.
+	// That is the same rule Docker and Kubernetes use to decide whether the
+	// first path segment is a host, so a service that pins its own registry
+	// keeps it without needing to opt out.
+	//
+	// Leave unset for the default: each image reference is used exactly as
+	// written, which for a bare name means Docker Hub.
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	Registry string `json:"registry,omitempty"`
+
+	// imagePullSecrets names docker-registry Secrets in the DevEnvironment's
+	// own namespace used to authenticate when pulling service images. They are
+	// copied into the environment namespace, because a pod cannot reference a
+	// Secret in another namespace.
+	//
+	// Applies to every service that does not name its own. A service's list
+	// replaces this one rather than adding to it, matching how registry
+	// behaves.
+	//
+	// Each Secret must be of type kubernetes.io/dockerconfigjson or the legacy
+	// kubernetes.io/dockercfg; anything else is rejected during reconcile
+	// rather than becoming an ImagePullBackOff with no explanation.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`
+	ImagePullSecrets []string `json:"imagePullSecrets,omitempty"`
 
 	// services are the supporting services deployed into the environment.
 	// +optional

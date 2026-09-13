@@ -120,6 +120,42 @@ you have selected. It is a tool, not a gate — reach for it deliberately when y
 are changing reconciler behaviour and want the feedback early, against a cluster
 of your own.
 
+### Where work comes from
+
+The backlog is **GitHub Issues**, not a file in this repository.
+
+```bash
+gh issue list                    # what is waiting
+gh issue view <n>                # why, and what was already decided
+gh issue create --label enhancement --title "..." --body "..."
+```
+
+That is a deliberate choice about cost. Every merge into `develop` goes through
+the five gates below — a branch, an independent review, CI, a MINOR version bump
+and a deploy to `picard`. Correct for changing the operator, and absurd for
+writing down an idea: a checked-in backlog would cut a version every time
+someone had a thought, and would rot the moment one entry went stale.
+
+Issues cost nothing to open and carry the reasoning next to the item.
+
+**Closing them is not automatic here, and it is worth knowing why.** A closing
+keyword acts on the **default branch**, which is `main` — and feature work
+merges into `develop`. A keyword in a merge request body fires when that merge
+request is merged into the default branch, and ours are not, so `Closes #14` in
+a description records the link and leaves the issue open.
+
+A keyword in a **commit message** is different: it fires when that commit
+reaches the default branch, whichever merge carried it there. So putting it in
+the commit closes the issue at the next promotion of `develop` into `main`.
+That depends on the commit surviving — it does here because merge requests are
+merged, not squashed, and a squash would replace the commit and its message.
+
+If neither applies, close the issue by hand when the work merges.
+
+So: when a decision defers something, **open an issue before the context is
+lost**, and say in the merge request that you did. A deferral recorded only in a
+commit message is a deferral nobody will find.
+
 ### Gate 1 — One branch per loop
 
 **Every change to the codebase starts on a feature branch cut from `develop`.**

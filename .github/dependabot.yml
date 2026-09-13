@@ -1,0 +1,13 @@
+# Actions are pinned by full commit SHA (#17), which is immutable and therefore
+# never picks up upstream fixes on its own. Dependabot reads the trailing
+# `# vX.Y.Z` comment, so it can bump both the SHA and the comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

@@ -1,5 +1,5 @@
 /*
-Copyright 2026.
+Copyright 2026 Zach Perkins.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -127,6 +128,70 @@ var _ = Describe("DevEnvironment", func() {
 		Entry("no probe at all", nil),
 	)
 
+	// The registry pattern is enforced by the API server, not by the
+	// reconciler, so it has to be exercised against a real one. A regex that
+	// silently accepts a scheme would produce `https://ghcr.io/redis:7` as an
+	// image reference and fail at pull time instead of at apply time.
+	DescribeTable("rejects a malformed registry at admission",
+		func(registry string) {
+			// Asserted on both fields, because they carry the same pattern and
+			// nothing but a test would notice if one of them lost it.
+			env := newResource(uniqueName())
+			env.Spec.Registry = registry
+			// MatchError, not a bare NotTo(Succeed()): without it an entry that
+			// failed for an unrelated reason — a name collision, some other
+			// invalid field — would pass silently and assert nothing.
+			Expect(k8sClient.Create(ctx, env)).To(MatchError(ContainSubstring("spec.registry")))
+
+			svcEnv := newResource(uniqueName())
+			svcEnv.Spec.Services[0].Registry = registry
+			Expect(k8sClient.Create(ctx, svcEnv)).To(MatchError(ContainSubstring("registry")))
+		},
+		Entry("a scheme", "https://ghcr.io"),
+		Entry("a trailing slash", "ghcr.io/myorg/"),
+		Entry("uppercase", "GHCR.io"),
+		Entry("a leading slash", "/ghcr.io"),
+		Entry("a space", "ghcr.io /myorg"),
+		Entry("an empty path segment", "ghcr.io//myorg"),
+	)
+
+	DescribeTable("accepts a well-formed registry",
+		func(registry string) {
+			env := newResource(uniqueName())
+			env.Spec.Registry = registry
+			env.Spec.Services[0].Registry = registry
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+		},
+		Entry("a bare host", "ghcr.io"),
+		Entry("a host and namespace", "ghcr.io/myorg"),
+		Entry("a host, port and path", "registry.internal:5000/mirror"),
+		Entry("localhost with a port", "localhost:5000"),
+		Entry("a deep path", "ghcr.io/myorg/team/sub"),
+	)
+
+	// Unstructured on purpose. An explicit empty string is how a templating
+	// tool spells "unset" — `registry: {{ .Values.registry }}` with no value —
+	// but the typed client cannot express it: `omitempty` drops the field
+	// before it is serialised, so the API server never sees it and the pattern
+	// never runs. Only a raw object reaches the validation this asserts.
+	It("accepts an explicitly empty registry, as a templated manifest sends it", func() {
+		name := uniqueName()
+		obj := &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": devenvv1alpha1.GroupVersion.String(),
+			"kind":       "DevEnvironment",
+			"metadata":   map[string]interface{}{"name": name, "namespace": "default"},
+			"spec": map[string]interface{}{
+				"owner":    "platform",
+				"registry": "",
+				"services": []interface{}{map[string]interface{}{
+					"name": "redis", "image": "redis:7-alpine",
+					"port": int64(6379), "registry": "",
+				}},
+			},
+		}}
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+	})
+
 	It("provisions a namespace, deployment and service", func() {
 		name := uniqueName()
 		env := newResource(name)
@@ -185,6 +250,27 @@ var _ = Describe("DevEnvironment", func() {
 	It("rejects an empty image", func() {
 		env := newResource(uniqueName())
 		env.Spec.Services[0].Image = ""
+		Expect(k8sClient.Create(ctx, env)).NotTo(Succeed())
+	})
+
+	It("accepts imagePullSecrets at both levels", func() {
+		env := newResource(uniqueName())
+		env.Spec.ImagePullSecrets = []string{"env-creds"}
+		env.Spec.Services[0].ImagePullSecrets = []string{"svc.creds-1"}
+		Expect(k8sClient.Create(ctx, env)).To(Succeed())
+	})
+
+	It("rejects an imagePullSecret name that is not a DNS subdomain", func() {
+		// Caught at apply time rather than becoming an unresolvable reference
+		// on the pod.
+		env := newResource(uniqueName())
+		env.Spec.ImagePullSecrets = []string{"Not A Name"}
+		Expect(k8sClient.Create(ctx, env)).NotTo(Succeed())
+	})
+
+	It("rejects a per-service imagePullSecret name that is not a DNS subdomain", func() {
+		env := newResource(uniqueName())
+		env.Spec.Services[0].ImagePullSecrets = []string{"UPPER"}
 		Expect(k8sClient.Create(ctx, env)).NotTo(Succeed())
 	})
 

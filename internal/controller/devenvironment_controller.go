@@ -1,5 +1,5 @@
 /*
-Copyright 2026.
+Copyright 2026 Zach Perkins.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -266,10 +266,32 @@ func (r *DevEnvironmentReconciler) reconcileConfigMap(ctx context.Context, env *
 // namespace into the environment namespace. Copying keeps the environment
 // self-contained; pods cannot reference a Secret across namespaces.
 func (r *DevEnvironmentReconciler) reconcileSecrets(ctx context.Context, env *devenvv1alpha1.DevEnvironment, ns string) error {
+	pull := map[string]struct{}{}
+	for _, name := range referencedPullSecrets(env) {
+		pull[name] = struct{}{}
+	}
+
 	for _, name := range referencedSecrets(env) {
 		var src corev1.Secret
 		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: env.Namespace}, &src); err != nil {
 			return fmt.Errorf("reading source secret %q: %w", name, err)
+		}
+
+		// A pull secret of the wrong type is accepted by the API server and
+		// then silently ignored by the kubelet, so the only symptom is an
+		// ImagePullBackOff that looks identical to a missing credential.
+		// Rejecting it here puts the reason in the DevEnvironment's own
+		// conditions instead.
+		//
+		// Both types the kubelet honours are accepted. Taking only
+		// dockerconfigjson would fail the whole environment over a legacy
+		// dockercfg Secret that would in fact have worked — a stricter rule
+		// than Kubernetes' own, which is not this check's job.
+		if _, isPull := pull[name]; isPull && !isDockerAuthSecret(src.Type) {
+			return fmt.Errorf(
+				"secret %q is named in imagePullSecrets but has type %q, want %q or %q",
+				name, src.Type, corev1.SecretTypeDockerConfigJson, corev1.SecretTypeDockercfg,
+			)
 		}
 
 		dst := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
@@ -348,6 +370,7 @@ func (r *DevEnvironmentReconciler) reconcileService(
 		deploy.Spec.Template.Labels = r.labels(env, spec.Name)
 		deploy.Spec.Template.Spec.Containers = []corev1.Container{r.container(env, spec)}
 		deploy.Spec.Template.Spec.Volumes = r.volumes(env, spec)
+		deploy.Spec.Template.Spec.ImagePullSecrets = pullSecretRefs(env, spec)
 		return nil
 	})
 	if err != nil {
@@ -389,7 +412,7 @@ func (r *DevEnvironmentReconciler) reconcileService(
 func (r *DevEnvironmentReconciler) container(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) corev1.Container {
 	c := corev1.Container{
 		Name:      spec.Name,
-		Image:     spec.Image,
+		Image:     imageRef(env, spec),
 		Ports:     []corev1.ContainerPort{{ContainerPort: spec.Port, Protocol: corev1.ProtocolTCP}},
 		Resources: spec.Resources,
 	}
@@ -421,6 +444,46 @@ func (r *DevEnvironmentReconciler) container(env *devenvv1alpha1.DevEnvironment,
 
 	c.ReadinessProbe = readinessProbe(spec)
 	return c
+}
+
+// imageRef resolves the image a service runs, applying the environment's
+// registry — or the service's own override — to an image that does not already
+// name one.
+func imageRef(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) string {
+	registry := spec.Registry
+	if registry == "" {
+		registry = env.Spec.Registry
+	}
+	if registry == "" || hasRegistry(spec.Image) {
+		return spec.Image
+	}
+	return registry + "/" + spec.Image
+}
+
+// hasRegistry reports whether an image reference already names a registry.
+//
+// This is Docker's own rule, and following it rather than inventing one is
+// what makes the feature predictable. The first path segment is a host if it
+// contains a dot or a colon, is exactly "localhost", or contains an uppercase
+// letter. Everything else is a Docker Hub repository — which is why
+// `redis:7-alpine` is a repository named redis rather than a registry named
+// redis, and why `myteam/api` is a Docker Hub org rather than a host.
+//
+// It also removes the need for a per-service opt-out: a service that pins
+// `quay.io/team/api:1` keeps it even when the environment sets a registry,
+// because rewriting it would produce `<registry>/quay.io/team/api:1`.
+func hasRegistry(image string) bool {
+	first, _, found := strings.Cut(image, "/")
+	if !found {
+		return false
+	}
+	// The uppercase clause is the easiest of the four to miss: a path component
+	// may not contain uppercase, so a dotless uppercase segment cannot be a
+	// repository. Without it `MYHOST/app:1` would become
+	// `<registry>/MYHOST/app:1`, an invalid reference that fails at pull time.
+	return first == "localhost" ||
+		strings.ContainsAny(first, ".:") ||
+		strings.ToLower(first) != first
 }
 
 // readinessProbe renders the service's probe, defaulting an empty handler to a
@@ -787,17 +850,81 @@ func (r *DevEnvironmentReconciler) owns(env *devenvv1alpha1.DevEnvironment, obj 
 func configMapName(env *devenvv1alpha1.DevEnvironment) string { return env.Name + "-config" }
 func pvcName(env *devenvv1alpha1.DevEnvironment) string       { return env.Name + "-workspace" }
 
-// referencedSecrets returns the deduplicated, sorted set of secrets named by
-// any service in the spec.
+// pullSecrets resolves the pull secrets a service uses, applying the
+// environment's — or the service's own override — with the same precedence as
+// imageRef applies registry.
+func pullSecrets(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []string {
+	if len(spec.ImagePullSecrets) > 0 {
+		return spec.ImagePullSecrets
+	}
+	return env.Spec.ImagePullSecrets
+}
+
+// pullSecretRefs renders the resolved pull secrets as pod-spec references.
+// Returns nil rather than an empty slice when there are none, so the pod
+// template matches what the API server stores and does not churn a rollout on
+// every reconcile.
+func pullSecretRefs(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []corev1.LocalObjectReference {
+	names := pullSecrets(env, spec)
+	if len(names) == 0 {
+		return nil
+	}
+	refs := make([]corev1.LocalObjectReference, 0, len(names))
+	for _, name := range names {
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+	return refs
+}
+
+// isDockerAuthSecret reports whether a Secret type is one the kubelet will use
+// as an image pull secret. dockercfg is the pre-1.9 format and is still
+// honoured.
+func isDockerAuthSecret(t corev1.SecretType) bool {
+	return t == corev1.SecretTypeDockerConfigJson || t == corev1.SecretTypeDockercfg
+}
+
+// referencedPullSecrets returns the deduplicated, sorted set of secrets used as
+// image pull secrets — the environment's own plus every service override.
+//
+// Every name is included rather than only the ones that survive resolution: a
+// service overriding the environment's list does not stop the environment's
+// secret from being needed by some other service, and copying one that turns
+// out to be unused is harmless.
+func referencedPullSecrets(env *devenvv1alpha1.DevEnvironment) []string {
+	seen := map[string]struct{}{}
+	for _, name := range env.Spec.ImagePullSecrets {
+		seen[name] = struct{}{}
+	}
+	for _, s := range env.Spec.Services {
+		for _, name := range s.ImagePullSecrets {
+			seen[name] = struct{}{}
+		}
+	}
+	return sortedKeys(seen)
+}
+
+// referencedSecrets returns the deduplicated, sorted set of secrets that must
+// exist in the environment namespace: those mounted via envFrom, plus every
+// image pull secret. Both are copied by the same loop.
 func referencedSecrets(env *devenvv1alpha1.DevEnvironment) []string {
 	seen := map[string]struct{}{}
+	for _, name := range referencedPullSecrets(env) {
+		seen[name] = struct{}{}
+	}
 	for _, s := range env.Spec.Services {
 		for _, name := range s.SecretRefs {
 			seen[name] = struct{}{}
 		}
 	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
+	return sortedKeys(seen)
+}
+
+// sortedKeys returns a set's members in a stable order. Map iteration is
+// random, and an unstable order here would rewrite the pod template — and so
+// trigger a rollout — on every reconcile.
+func sortedKeys(set map[string]struct{}) []string {
+	names := make([]string, 0, len(set))
+	for name := range set {
 		names = append(names, name)
 	}
 	sort.Strings(names)
