@@ -356,33 +356,46 @@ func (r *DevEnvironmentReconciler) replaceOnTypeChange(
 	if err != nil {
 		return false, fmt.Errorf("reading copied secret %q: %w", name, err)
 	}
-	if existing.Type == want {
-		return false, nil
-	}
-
-	// Only ever delete a copy this environment made. The environment namespace
-	// is somewhere developers deploy into, so a same-named Secret from
-	// cert-manager or from a person is entirely possible — and destroying one
-	// to resolve a name collision would be far worse than the wedged reconcile
-	// this exists to prevent.
+	// Ownership is checked before the type comparison, not after it. Anything
+	// already sitting at this name has to be ours before we write to it at
+	// all: the environment namespace is somewhere developers deploy into, so a
+	// same-named Secret from cert-manager or from a person is entirely
+	// possible. Checking only on the type-mismatch path left the commoner case
+	// — a foreign Secret that happens to have the same type — falling through
+	// to CreateOrUpdate, which overwrites its data and stamps it
+	// operator-managed, after which the finalizer deletes it on teardown.
 	if !r.owns(env, &existing) {
 		return false, fmt.Errorf(
-			"secret %q in namespace %q has type %q, not %q, and is not managed by this DevEnvironment; "+
+			"secret %q in namespace %q already exists and is not managed by this DevEnvironment; "+
 				"rename the reference or remove that secret",
-			name, ns, existing.Type, want,
+			name, ns,
 		)
+	}
+
+	if existing.Type == want {
+		return false, nil
 	}
 
 	// Guard on UID: between the read above and this delete another reconcile
 	// may already have replaced the copy, and deleting the correct one would
 	// undo that. Secrets carry no finalizers, so the delete completes before
-	// the caller recreates. NotFound or a failed precondition both mean someone
-	// else got there first, which is the state we wanted.
+	// the caller recreates.
 	if err := r.Delete(ctx, &existing, client.Preconditions{UID: &existing.UID}); err != nil {
-		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
-			return false, nil
+		switch {
+		case apierrors.IsNotFound(err):
+			// Already gone. Report it as replaced so the caller Creates: the
+			// alternative routes it into CreateOrUpdate, whose cached Get can
+			// still return this Secret and turn the write into an Update that
+			// fails NotFound — the very path the replaced branch avoids.
+			return true, nil
+		case apierrors.IsConflict(err):
+			// A different object now holds this name, so everything read above
+			// is stale. Requeue and start from a fresh read rather than
+			// guessing which of the two is current.
+			return false, fmt.Errorf("secret %q changed while being replaced: %w", name, err)
+		default:
+			return false, fmt.Errorf("replacing secret %q after its type changed to %q: %w", name, want, err)
 		}
-		return false, fmt.Errorf("replacing secret %q after its type changed to %q: %w", name, want, err)
 	}
 	return true, nil
 }

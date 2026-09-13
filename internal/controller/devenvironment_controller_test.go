@@ -406,6 +406,38 @@ func TestReferencedPullSecretsAreDedupedAndSorted(t *testing.T) {
 	assert.Equal(t, []string{"alpha", "mike", "zulu"}, referencedPullSecrets(env))
 }
 
+func TestReconcileRefusesToOverwriteAForeignSecretOfTheSameType(t *testing.T) {
+	// The commoner collision: a Secret someone else owns that happens to have
+	// the SAME type as the source. Checking ownership only on the type-mismatch
+	// path let this fall through to CreateOrUpdate, which overwrote the data
+	// and stamped it operator-managed — after which teardown deleted it.
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "creds",
+			Namespace: targetNS,
+			Labels:    map[string]string{"app": "something-else"},
+		},
+		Type: corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{".dockerconfigjson": []byte(`{"auths":{"theirs":{}}}`)},
+	}
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"creds"}
+	}), dockerCfg("creds"), foreign)
+	ctx := context.Background()
+
+	_, err := r.Reconcile(ctx, request())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not managed by this DevEnvironment")
+
+	var after corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "creds", Namespace: targetNS}, &after))
+	assert.Equal(t, []byte(`{"auths":{"theirs":{}}}`), after.Data[".dockerconfigjson"],
+		"their data must be untouched")
+	assert.Equal(t, "something-else", after.Labels["app"], "their labels must be untouched")
+	assert.NotEqual(t, managerName, after.Labels[labelManagedBy],
+		"must not be stamped operator-managed, or teardown would delete it")
+}
+
 func TestReconcileRefusesToReplaceASecretItDoesNotOwn(t *testing.T) {
 	// The environment namespace is somewhere developers deploy into, so a
 	// same-named Secret from cert-manager or a person is possible. Replacing
@@ -443,12 +475,19 @@ func TestReplaceOnTypeChangeReadsThroughTheAPIReader(t *testing.T) {
 	env := newEnv()
 	sch := testScheme(t)
 
+	// Labelled as a copy this environment made: ownership is checked before the
+	// type comparison, and a real copy always carries these.
+	ours := map[string]string{
+		labelManagedBy:      managerName,
+		labelEnvironment:    envName,
+		labelOwnerNamespace: envNS,
+	}
 	stale := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: targetNS},
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: targetNS, Labels: ours},
 		Type:       corev1.SecretTypeOpaque,
 	}
 	current := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: targetNS},
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: targetNS, Labels: ours},
 		Type:       corev1.SecretTypeDockerConfigJson,
 	}
 	r := &DevEnvironmentReconciler{
