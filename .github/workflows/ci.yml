@@ -655,6 +655,99 @@ jobs:
             echo "| Available / Degraded | $AV / $DG |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # spec.registry and spec.services[].registry were covered by unit tests
+      # and by the CRD pattern in envtest, but nothing pulled through a
+      # resolved reference on a real cluster (#22). A second environment rather
+      # than more services on the one above: setting spec.registry there would
+      # rewrite its bare `redis:7-alpine` into a registry that does not serve
+      # it, and mixing the two makes a registry failure look like a storage or
+      # config failure.
+      #
+      # Every image must listen on its declared port. An unset readinessProbe
+      # defaults to a TCP check against spec.services[].port, so a container
+      # that runs but binds nothing never goes Ready and this step burns its
+      # full 300s before failing (#15). That rules out pause-style images.
+      - name: Validate registry resolution end to end
+        run: |
+          set -euo pipefail
+          REG_ENV="regcheck-${GITHUB_SHA::7}"
+          echo "REG_ENV=$REG_ENV" >> "$GITHUB_ENV"
+          fail(){ echo "::error::$*"; exit 1; }
+
+          # Three services, one per branch of imageRef():
+          #   exporter  inherits spec.registry          -> quay.io/...
+          #   postgres  overrides it per service        -> docker.io/library/...
+          #   redis     already names a host, unchanged -> NOT quay.io/docker.io/...
+          #
+          # redis is the regression that matters: rewriting an image that
+          # already names a registry yields `quay.io/docker.io/library/redis`,
+          # which fails at pull time rather than at apply time.
+          cat <<YAML | kubectl --context "$CTX" apply -f -
+          apiVersion: devenv.aviture.dev/v1alpha1
+          kind: DevEnvironment
+          metadata:
+            name: $REG_ENV
+            namespace: default
+          spec:
+            owner: ci-validation
+            registry: quay.io
+            services:
+              - name: exporter
+                image: "prometheus/node-exporter:latest"
+                port: 9100
+              - name: postgres
+                registry: docker.io/library
+                image: "postgres:16-alpine"
+                port: 5432
+                env:
+                  POSTGRES_PASSWORD: verify
+                  PGDATA: /var/lib/postgresql/data/pgdata
+              - name: redis
+                image: "docker.io/library/redis:7-alpine"
+                port: 6379
+          YAML
+
+          for i in $(seq 1 60); do
+            PH=$(kubectl --context "$CTX" -n default get devenvironment "$REG_ENV" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            [ "$PH" = "Ready" ] && break
+            sleep 5
+          done
+          [ "${PH:-}" = "Ready" ] || fail "registry env phase=${PH:-<none>} after 300s"
+
+          # What the operator WROTE. jsonpath over a named deployment rather
+          # than an index: `items[0]` depends on kubectl's sort order, so an
+          # index would silently compare the wrong service.
+          want_exporter="quay.io/prometheus/node-exporter:latest"
+          want_postgres="docker.io/library/postgres:16-alpine"
+          want_redis="docker.io/library/redis:7-alpine"
+          for svc in exporter postgres redis; do
+            eval "want=\$want_$svc"
+            got=$(kubectl --context "$CTX" -n "$REG_ENV" get deploy "$svc" -o jsonpath='{.spec.template.spec.containers[0].image}')
+            [ "$got" = "$want" ] || fail "$svc image=$got, want $want"
+            echo "$svc -> $got"
+          done
+
+          # And that it PULLED. Phase Ready already implies every pod passed its
+          # readiness probe, so this cannot fail on its own — it is here so that
+          # a future change decoupling phase from pod readiness does not turn
+          # this step into an assertion about YAML only.
+          for svc in exporter postgres redis; do
+            rdy=$(kubectl --context "$CTX" -n "$REG_ENV" get pods -l devenv.aviture.dev/service="$svc" -o jsonpath='{.items[*].status.containerStatuses[*].ready}')
+            case "$rdy" in
+              *false*|"") fail "$svc pods not ready (ready='$rdy'); image never pulled" ;;
+            esac
+          done
+
+          {
+            echo "### registry resolution — \`$V\`"
+            echo
+            echo "| service | rule | image |"
+            echo "| --- | --- | --- |"
+            echo "| exporter | inherits \`spec.registry\` | \`$want_exporter\` |"
+            echo "| postgres | per-service override | \`$want_postgres\` |"
+            echo "| redis | already names a host | \`$want_redis\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # Declared BEFORE teardown on purpose. Steps run in declaration order
       # regardless of their `if`, so with this below the teardown step the
       # namespace, its pods and its events were already deleted by the time
@@ -673,13 +766,17 @@ jobs:
           kubectl --context "$CTX" -n "$NS" logs --selector app.kubernetes.io/name=kado-operator --prefix --previous --tail=200
           kubectl --context "$CTX" -n "$NS" describe pods
           kubectl --context "$CTX" -n "$NS" get events --sort-by=.lastTimestamp
-          if [ -n "${TEST_ENV:-}" ]; then
-            echo "--- test environment $TEST_ENV ---"
-            kubectl --context "$CTX" -n default describe devenvironment "$TEST_ENV"
-            kubectl --context "$CTX" -n "$TEST_ENV" get deploy,svc,pvc,pods -o wide
-            kubectl --context "$CTX" -n "$TEST_ENV" describe pods
-            kubectl --context "$CTX" -n "$TEST_ENV" get events --sort-by=.lastTimestamp
-          fi
+          # Both environments: a registry failure shows up as ImagePullBackOff
+          # on the pod, so `describe pods` in the right namespace is the whole
+          # diagnosis.
+          for e in "${TEST_ENV:-}" "${REG_ENV:-}"; do
+            [ -n "$e" ] || continue
+            echo "--- test environment $e ---"
+            kubectl --context "$CTX" -n default describe devenvironment "$e"
+            kubectl --context "$CTX" -n "$e" get deploy,svc,pvc,pods -o wide
+            kubectl --context "$CTX" -n "$e" describe pods
+            kubectl --context "$CTX" -n "$e" get events --sort-by=.lastTimestamp
+          done
 
       # Teardown is part of the operator's contract, so proving it is part of
       # the validation.
@@ -687,36 +784,52 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          [ -n "${TEST_ENV:-}" ] || { echo "no test environment was created"; exit 0; }
-          # Unguarded, this aborts the step under `set -e` the moment the
-          # delete times out — which is exactly what happens when the
-          # DevEnvironment is stuck on the operator's own finalizer, i.e. when
-          # the reconciler is broken, i.e. when this job fires. The step would
-          # die here with no evidence and no ::error:: annotation. Falling
-          # through instead lets the namespace check below fire the evidence
-          # block and exit 1 properly.
-          kubectl --context "$CTX" -n default delete devenvironment "$TEST_ENV" --ignore-not-found --timeout=180s \
-            || echo "delete did not complete in 180s; collecting evidence below"
-          for i in $(seq 1 40); do
-            kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1 || break
-            sleep 3
+          if [ -z "${TEST_ENV:-}" ] && [ -z "${REG_ENV:-}" ]; then
+            echo "no test environment was created"
+            exit 0
+          fi
+
+          # Both environments are torn down before the step reports, so one
+          # leaked namespace cannot hide the other: `leaked` records a failure
+          # and the loop continues rather than exiting on the first one.
+          leaked=""
+          for e in "${TEST_ENV:-}" "${REG_ENV:-}"; do
+            [ -n "$e" ] || continue
+            # Unguarded, this aborts the step under `set -e` the moment the
+            # delete times out — which is exactly what happens when the
+            # DevEnvironment is stuck on the operator's own finalizer, i.e. when
+            # the reconciler is broken, i.e. when this job fires. The step would
+            # die here with no evidence and no ::error:: annotation. Falling
+            # through instead lets the namespace check below fire the evidence
+            # block and exit 1 properly.
+            kubectl --context "$CTX" -n default delete devenvironment "$e" --ignore-not-found --timeout=180s \
+              || echo "delete of $e did not complete in 180s; collecting evidence below"
+            for i in $(seq 1 40); do
+              kubectl --context "$CTX" get ns "$e" >/dev/null 2>&1 || break
+              sleep 3
+            done
+            if kubectl --context "$CTX" get ns "$e" >/dev/null 2>&1; then
+              # Capture evidence inline. This step runs LAST, and the
+              # `if: failure()` diagnostics step above was already evaluated —
+              # so when everything else passed and only teardown failed, nothing
+              # else will collect anything. Reclaiming the namespace is one of
+              # this job's own contract assertions, so it does not get to fail
+              # bare.
+              echo "--- devenvironment $e (expect a lingering finalizer) ---"
+              kubectl --context "$CTX" -n default get devenvironment "$e" -o yaml || true
+              echo "--- namespace ---"
+              kubectl --context "$CTX" get ns "$e" -o yaml || true
+              echo "--- what is left in it ---"
+              kubectl --context "$CTX" -n "$e" get all,pvc -o wide || true
+              echo "::error::namespace $e was not reclaimed; the finalizer did not release"
+              leaked="$leaked $e"
+            else
+              echo "namespace $e reclaimed, finalizer released"
+            fi
           done
-          if kubectl --context "$CTX" get ns "$TEST_ENV" >/dev/null 2>&1; then
-            # Capture evidence inline. This step runs LAST, and the
-            # `if: failure()` diagnostics step above was already evaluated —
-            # so when everything else passed and only teardown failed, nothing
-            # else will collect anything. Reclaiming the namespace is one of
-            # this job's own contract assertions, so it does not get to fail
-            # bare.
-            echo "--- devenvironment (expect a lingering finalizer) ---"
-            kubectl --context "$CTX" -n default get devenvironment "$TEST_ENV" -o yaml || true
-            echo "--- namespace ---"
-            kubectl --context "$CTX" get ns "$TEST_ENV" -o yaml || true
-            echo "--- what is left in it ---"
-            kubectl --context "$CTX" -n "$TEST_ENV" get all,pvc -o wide || true
+
+          if [ -n "$leaked" ]; then
             echo "--- operator logs ---"
             kubectl --context "$CTX" -n "$NS" logs --selector app.kubernetes.io/name=kado-operator --tail=200 || true
-            echo "::error::namespace $TEST_ENV was not reclaimed; the finalizer did not release"
             exit 1
           fi
-          echo "namespace reclaimed, finalizer released"
