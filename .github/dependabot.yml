@@ -8,6 +8,19 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # Routine bumps batch into one PR; majors do not (#41). An action's major
+      # can change its inputs, outputs or runtime with no code change of ours —
+      # the first, ungrouped run moved all 11 actions from node20 to node24,
+      # which needs Actions Runner >= 2.327.1 and would have broken the
+      # self-hosted job on an older one. Nothing in that PR said so.
+      #
+      # Grouped, the reviewable unit is all-or-nothing and a red pipeline has
+      # eleven suspects. An update that does not match the group is not
+      # dropped — Dependabot raises it on its own, so each major becomes a
+      # small diff that can be read, and reverted, by itself.
       actions:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
