@@ -67,6 +67,26 @@ spec:
                   config is injected into the environment namespace as a ConfigMap named
                   "<environment>-config" and exposed to every service via envFrom.
                 type: object
+              imagePullSecrets:
+                description: |-
+                  imagePullSecrets names docker-registry Secrets in the DevEnvironment's
+                  own namespace used to authenticate when pulling service images. They are
+                  copied into the environment namespace, because a pod cannot reference a
+                  Secret in another namespace.
+
+                  Applies to every service that does not name its own. A service's list
+                  replaces this one rather than adding to it, matching how registry
+                  behaves.
+
+                  Each Secret must be of type kubernetes.io/dockerconfigjson; anything
+                  else is rejected during reconcile rather than becoming an
+                  ImagePullBackOff with no explanation.
+                items:
+                  maxLength: 253
+                  pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
+                  type: string
+                type: array
+                x-kubernetes-list-type: atomic
               namespaceName:
                 description: |-
                   namespaceName is the namespace provisioned for this environment. It
@@ -120,6 +140,26 @@ spec:
                       description: image is the container image to run.
                       minLength: 1
                       type: string
+                    imagePullSecrets:
+                      description: |-
+                        imagePullSecrets names docker-registry Secrets in the DevEnvironment's
+                        own namespace used to authenticate when pulling this service's image.
+                        They are copied into the environment namespace alongside secretRefs.
+
+                        Overrides spec.imagePullSecrets for this service alone — the same rule
+                        as registry, so a service that pins its own private registry names the
+                        credentials for it and does not inherit the environment's. Leave unset
+                        to inherit.
+
+                        Each Secret must be of type kubernetes.io/dockerconfigjson; anything
+                        else is rejected during reconcile rather than becoming an
+                        ImagePullBackOff with no explanation.
+                      items:
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
                     mountPath:
                       description: |-
                         mountPath, when set, mounts the environment's shared volume into the

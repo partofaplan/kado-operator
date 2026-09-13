@@ -266,10 +266,27 @@ func (r *DevEnvironmentReconciler) reconcileConfigMap(ctx context.Context, env *
 // namespace into the environment namespace. Copying keeps the environment
 // self-contained; pods cannot reference a Secret across namespaces.
 func (r *DevEnvironmentReconciler) reconcileSecrets(ctx context.Context, env *devenvv1alpha1.DevEnvironment, ns string) error {
+	pull := map[string]struct{}{}
+	for _, name := range referencedPullSecrets(env) {
+		pull[name] = struct{}{}
+	}
+
 	for _, name := range referencedSecrets(env) {
 		var src corev1.Secret
 		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: env.Namespace}, &src); err != nil {
 			return fmt.Errorf("reading source secret %q: %w", name, err)
+		}
+
+		// A pull secret of the wrong type is accepted by the API server and
+		// then silently ignored by the kubelet, so the only symptom is an
+		// ImagePullBackOff that looks identical to a missing credential.
+		// Rejecting it here puts the reason in the DevEnvironment's own
+		// conditions instead.
+		if _, isPull := pull[name]; isPull && src.Type != corev1.SecretTypeDockerConfigJson {
+			return fmt.Errorf(
+				"secret %q is named in imagePullSecrets but has type %q, want %q",
+				name, src.Type, corev1.SecretTypeDockerConfigJson,
+			)
 		}
 
 		dst := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
@@ -348,6 +365,7 @@ func (r *DevEnvironmentReconciler) reconcileService(
 		deploy.Spec.Template.Labels = r.labels(env, spec.Name)
 		deploy.Spec.Template.Spec.Containers = []corev1.Container{r.container(env, spec)}
 		deploy.Spec.Template.Spec.Volumes = r.volumes(env, spec)
+		deploy.Spec.Template.Spec.ImagePullSecrets = pullSecretRefs(env, spec)
 		return nil
 	})
 	if err != nil {
@@ -827,17 +845,74 @@ func (r *DevEnvironmentReconciler) owns(env *devenvv1alpha1.DevEnvironment, obj 
 func configMapName(env *devenvv1alpha1.DevEnvironment) string { return env.Name + "-config" }
 func pvcName(env *devenvv1alpha1.DevEnvironment) string       { return env.Name + "-workspace" }
 
-// referencedSecrets returns the deduplicated, sorted set of secrets named by
-// any service in the spec.
+// pullSecrets resolves the pull secrets a service uses, applying the
+// environment's — or the service's own override — with the same precedence as
+// imageRef applies registry.
+func pullSecrets(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []string {
+	if len(spec.ImagePullSecrets) > 0 {
+		return spec.ImagePullSecrets
+	}
+	return env.Spec.ImagePullSecrets
+}
+
+// pullSecretRefs renders the resolved pull secrets as pod-spec references.
+// Returns nil rather than an empty slice when there are none, so the pod
+// template matches what the API server stores and does not churn a rollout on
+// every reconcile.
+func pullSecretRefs(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []corev1.LocalObjectReference {
+	names := pullSecrets(env, spec)
+	if len(names) == 0 {
+		return nil
+	}
+	refs := make([]corev1.LocalObjectReference, 0, len(names))
+	for _, name := range names {
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+	return refs
+}
+
+// referencedPullSecrets returns the deduplicated, sorted set of secrets used as
+// image pull secrets — the environment's own plus every service override.
+//
+// Every name is included rather than only the ones that survive resolution: a
+// service overriding the environment's list does not stop the environment's
+// secret from being needed by some other service, and copying one that turns
+// out to be unused is harmless.
+func referencedPullSecrets(env *devenvv1alpha1.DevEnvironment) []string {
+	seen := map[string]struct{}{}
+	for _, name := range env.Spec.ImagePullSecrets {
+		seen[name] = struct{}{}
+	}
+	for _, s := range env.Spec.Services {
+		for _, name := range s.ImagePullSecrets {
+			seen[name] = struct{}{}
+		}
+	}
+	return sortedKeys(seen)
+}
+
+// referencedSecrets returns the deduplicated, sorted set of secrets that must
+// exist in the environment namespace: those mounted via envFrom, plus every
+// image pull secret. Both are copied by the same loop.
 func referencedSecrets(env *devenvv1alpha1.DevEnvironment) []string {
 	seen := map[string]struct{}{}
+	for _, name := range referencedPullSecrets(env) {
+		seen[name] = struct{}{}
+	}
 	for _, s := range env.Spec.Services {
 		for _, name := range s.SecretRefs {
 			seen[name] = struct{}{}
 		}
 	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
+	return sortedKeys(seen)
+}
+
+// sortedKeys returns a set's members in a stable order. Map iteration is
+// random, and an unstable order here would rewrite the pod template — and so
+// trigger a rollout — on every reconcile.
+func sortedKeys(set map[string]struct{}) []string {
+	names := make([]string, 0, len(set))
+	for name := range set {
 		names = append(names, name)
 	}
 	sort.Strings(names)
