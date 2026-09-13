@@ -93,6 +93,11 @@ func (in *DevEnvironmentSpec) DeepCopyInto(out *DevEnvironmentSpec) {
 		*out = new(StorageSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.ImagePullSecrets != nil {
+		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Services != nil {
 		in, out := &in.Services, &out.Services
 		*out = make([]ServiceSpec, len(*in))
@@ -158,6 +163,11 @@ func (in *ServiceSpec) DeepCopyInto(out *ServiceSpec) {
 	}
 	if in.SecretRefs != nil {
 		in, out := &in.SecretRefs, &out.SecretRefs
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.ImagePullSecrets != nil {
+		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}

@@ -49,6 +49,7 @@ For a `DevEnvironment` named `team-alpha`:
 | Namespace | `team-alpha` (or `spec.namespaceName`) | always |
 | ConfigMap | `team-alpha-config` | `spec.config` is non-empty |
 | Secret | one per name in `spec.services[].secretRefs` | a service references it |
+| Secret | one per name in `imagePullSecrets` | the environment or a service references it |
 | PersistentVolumeClaim | `team-alpha-workspace` | `spec.storage` is set |
 | Deployment | one per `spec.services[].name` | always |
 | Service | one per `spec.services[].name` (ClusterIP) | always |
@@ -79,6 +80,7 @@ what it is allowed to delete.
 | `storage` | [StorageSpec](#storagespec) | — | Requests a shared volume for the environment. |
 | `services` | [[]ServiceSpec](#servicespec) | — | Supporting services to deploy. Keyed by `name`; duplicates are rejected. |
 | `registry` | string | — | Registry (and optional namespace path) for every service's image, e.g. `ghcr.io/myorg`. See [Registries](#registries). |
+| `imagePullSecrets` | []string | — | docker-registry Secrets in the `DevEnvironment`'s **own** namespace, copied into the environment namespace and used to pull every service's image. See [Private registries](#private-registries). |
 | `config` | map[string]string | — | Injected as `<name>-config` and exposed to every service via `envFrom`. |
 
 ### StorageSpec
@@ -106,6 +108,7 @@ silently attempts.
 | `mountPath` | string | — | Mounts the shared volume here. Requires `spec.storage`. |
 | `resources` | ResourceRequirements | — | Compute resources for the container. |
 | `registry` | string | — | Overrides `spec.registry` for this service. See [Registries](#registries). |
+| `imagePullSecrets` | []string | — | Replaces `spec.imagePullSecrets` for this service. See [Private registries](#private-registries). |
 | `readinessProbe` | Probe | — | Gates when the service counts as ready. A standard Kubernetes probe; leave the handler empty (`readinessProbe: {}`) for a TCP check against this service's own `port`. See [Readiness](#readiness). |
 
 Put credentials in `secretRefs`, not `env` — `env` values are stored in the
@@ -213,6 +216,56 @@ only be a host. Two consequences worth knowing:
 
 Changing a registry rolls the affected services, as any image change does.
 
+## Private registries
+
+`registry` chooses **where** an image comes from; `imagePullSecrets` is how the
+kubelet authenticates to it. Without one, a private registry fails with
+`ImagePullBackOff`.
+
+Name a docker-registry Secret that lives in the `DevEnvironment`'s **own**
+namespace. It is copied into the environment namespace, because a pod cannot
+reference a Secret in another namespace — the same thing `secretRefs` does:
+
+```yaml
+spec:
+  registry: ghcr.io/myorg
+  imagePullSecrets:
+    - ghcr-creds            # every service
+  services:
+    - name: api
+      image: api:1
+    - name: vendor
+      registry: registry.vendor.io
+      imagePullSecrets:
+        - vendor-creds      # this service only
+      image: tool:2
+```
+
+Create the Secret the usual way, in the namespace the `DevEnvironment` lives in:
+
+```bash
+kubectl create secret docker-registry ghcr-creds \
+  --docker-server=ghcr.io \
+  --docker-username="$USER" \
+  --docker-password="$TOKEN"
+```
+
+**A service's list replaces the environment's, it does not add to it** — the
+same rule `registry` follows. A service pinned to a different private registry
+names its own credentials and inherits nothing, which is almost always what you
+want, since the environment's credentials would not work against that registry
+anyway. To use both, name both on the service.
+
+Every referenced Secret is copied, including ones only some services use. An
+unused copy is harmless, and the alternative — working out which secrets survive
+resolution — would mean the set changed whenever a service was added.
+
+**The Secret must be of type `kubernetes.io/dockerconfigjson`.** Anything else
+is rejected during reconcile, with the reason in the environment's conditions.
+Kubernetes itself accepts a wrong-typed Secret here and then silently ignores
+it, so the only symptom would otherwise be an `ImagePullBackOff` that looks
+exactly like a bad password.
+
 ## Readiness
 
 Without a probe, `readyServices` counts containers Kubernetes *started*, not
@@ -273,7 +326,8 @@ kubectl describe devenvironment team-alpha
 | Symptom | Likely cause |
 | --- | --- |
 | `Degraded=True`, "not managed by this DevEnvironment" | The target namespace already exists and belongs to something else. Pick a different `namespaceName`. |
-| `Degraded=True`, "reading source secret" | A name in `secretRefs` does not exist in the `DevEnvironment`'s own namespace. |
+| `Degraded=True`, "reading source secret" | A name in `secretRefs` or `imagePullSecrets` does not exist in the `DevEnvironment`'s own namespace. |
+| `Degraded=True`, "named in imagePullSecrets but has type" | The Secret exists but is not `kubernetes.io/dockerconfigjson`. Recreate it with `kubectl create secret docker-registry`. |
 | `Degraded=True`, reason `WorkloadUnhealthy` | A container cannot start. The message names the service, the blocking reason (`CrashLoopBackOff`, `ImagePullBackOff`, `Unschedulable`, …), the last exit code and the `kubectl logs` command that shows why. A missing required env var — `POSTGRES_PASSWORD`, say — lands here. |
 | Stuck at `Provisioning` with `Degraded=False` | Pods are running but not ready. Nothing is *blocked*, so this is not degraded: check image pull times, whether a PVC is waiting for a consumer (a volume no service mounts stays `Pending` forever), and whether a `readinessProbe` is pointed at a port nothing serves. A probe that never passes will sit here indefinitely — `kubectl describe pod -n <env>` shows the failing probe. |
 | Stuck deleting | The namespace is still terminating, usually a finalizer on something inside it. `kubectl get ns <env> -o yaml`. |

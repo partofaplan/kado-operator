@@ -205,6 +205,121 @@ func TestReconcileFailsWhenReferencedSecretMissing(t *testing.T) {
 	assert.True(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded))
 }
 
+// dockerCfg builds a docker-registry Secret of the type the kubelet requires.
+func dockerCfg(name string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: envNS},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)},
+	}
+}
+
+func TestReconcileCopiesPullSecretAndReferencesItOnThePod(t *testing.T) {
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"regcreds"}
+	}), dockerCfg("regcreds"))
+	reconcile(t, r)
+
+	// Copied into the environment namespace with its type intact — a
+	// dockerconfigjson secret copied as Opaque is ignored by the kubelet.
+	var copied corev1.Secret
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "regcreds", Namespace: targetNS}, &copied))
+	assert.Equal(t, corev1.SecretTypeDockerConfigJson, copied.Type)
+
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	assert.Equal(t,
+		[]corev1.LocalObjectReference{{Name: "regcreds"}},
+		deploy.Spec.Template.Spec.ImagePullSecrets,
+	)
+}
+
+func TestReconcileServicePullSecretsReplaceTheEnvironments(t *testing.T) {
+	// Replace, not append — the same precedence registry uses.
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"env-creds"}
+		e.Spec.Services[0].ImagePullSecrets = []string{"svc-creds"}
+	}), dockerCfg("env-creds"), dockerCfg("svc-creds"))
+	reconcile(t, r)
+
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	assert.Equal(t,
+		[]corev1.LocalObjectReference{{Name: "svc-creds"}},
+		deploy.Spec.Template.Spec.ImagePullSecrets,
+	)
+
+	// The environment's secret is still copied even though this service does
+	// not use it: another service may, and an unused copy is harmless.
+	var copied corev1.Secret
+	assert.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "env-creds", Namespace: targetNS}, &copied))
+}
+
+func TestReconcileLeavesPullSecretsUnsetWhenNoneAreNamed(t *testing.T) {
+	// nil rather than an empty slice: an empty slice round-trips through the
+	// API server as nil and would rewrite the pod template every reconcile.
+	r, c := newReconciler(t, newEnv())
+	reconcile(t, r)
+
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	assert.Nil(t, deploy.Spec.Template.Spec.ImagePullSecrets)
+}
+
+func TestReconcileRejectsAPullSecretOfTheWrongType(t *testing.T) {
+	// An Opaque secret is accepted by the API server and then silently ignored
+	// by the kubelet, so without this check the only symptom is an
+	// ImagePullBackOff indistinguishable from a bad credential.
+	opaque := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "regcreds", Namespace: envNS},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{"PASSWORD": []byte("hunter2")},
+	}
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"regcreds"}
+	}), opaque)
+	ctx := context.Background()
+
+	_, err := r.Reconcile(ctx, request())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kubernetes.io/dockerconfigjson")
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(ctx, request().NamespacedName, &env))
+	assert.Equal(t, devenvv1alpha1.PhaseFailed, env.Status.Phase)
+	assert.True(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded))
+}
+
+func TestReconcileAcceptsASecretUsedForBothEnvFromAndPulling(t *testing.T) {
+	// The same name in secretRefs and imagePullSecrets must be copied once and
+	// still satisfy the pull-secret type check.
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"shared"}
+		e.Spec.Services[0].SecretRefs = []string{"shared"}
+	}), dockerCfg("shared"))
+	reconcile(t, r)
+
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	assert.Equal(t,
+		[]corev1.LocalObjectReference{{Name: "shared"}},
+		deploy.Spec.Template.Spec.ImagePullSecrets,
+	)
+}
+
+func TestReferencedPullSecretsAreDedupedAndSorted(t *testing.T) {
+	env := newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"zulu", "alpha"}
+		e.Spec.Services = append(e.Spec.Services, devenvv1alpha1.ServiceSpec{
+			Name:             "api",
+			Image:            "api:1",
+			Port:             8080,
+			ImagePullSecrets: []string{"alpha", "mike"},
+		})
+	})
+	assert.Equal(t, []string{"alpha", "mike", "zulu"}, referencedPullSecrets(env))
+}
+
 func TestReconcileRefusesToAdoptUnmanagedNamespace(t *testing.T) {
 	// A namespace someone else already owns must not be taken over, and above
 	// all must not later be deleted by our finalizer.

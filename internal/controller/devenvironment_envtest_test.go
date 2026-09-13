@@ -253,6 +253,27 @@ var _ = Describe("DevEnvironment", func() {
 		Expect(k8sClient.Create(ctx, env)).NotTo(Succeed())
 	})
 
+	It("accepts imagePullSecrets at both levels", func() {
+		env := newResource(uniqueName())
+		env.Spec.ImagePullSecrets = []string{"env-creds"}
+		env.Spec.Services[0].ImagePullSecrets = []string{"svc.creds-1"}
+		Expect(k8sClient.Create(ctx, env)).To(Succeed())
+	})
+
+	It("rejects an imagePullSecret name that is not a DNS subdomain", func() {
+		// Caught at apply time rather than becoming an unresolvable reference
+		// on the pod.
+		env := newResource(uniqueName())
+		env.Spec.ImagePullSecrets = []string{"Not A Name"}
+		Expect(k8sClient.Create(ctx, env)).NotTo(Succeed())
+	})
+
+	It("rejects a per-service imagePullSecret name that is not a DNS subdomain", func() {
+		env := newResource(uniqueName())
+		env.Spec.Services[0].ImagePullSecrets = []string{"UPPER"}
+		Expect(k8sClient.Create(ctx, env)).NotTo(Succeed())
+	})
+
 	It("refuses to change namespaceName after creation", func() {
 		name := uniqueName()
 		env := newResource(name)
