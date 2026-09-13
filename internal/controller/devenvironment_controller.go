@@ -463,7 +463,7 @@ func (r *DevEnvironmentReconciler) reconcileService(
 		deploy.Spec.Template.Spec.Containers = []corev1.Container{r.container(env, spec)}
 		deploy.Spec.Template.Spec.Volumes = r.volumes(env, spec)
 		deploy.Spec.Template.Spec.ImagePullSecrets = pullSecretRefs(env, spec)
-		deploy.Spec.Template.Spec.SecurityContext = podSecurityContext(env, spec)
+		applyFSGroup(env, spec, &deploy.Spec.Template.Spec)
 		return nil
 	})
 	if err != nil {
@@ -602,8 +602,8 @@ func readinessProbe(spec *devenvv1alpha1.ServiceSpec) *corev1.Probe {
 	return probe
 }
 
-// podSecurityContext carries spec.storage.fsGroup onto the pods that mount the
-// shared volume, which is what lets a non-root image write to it.
+// applyFSGroup carries spec.storage.fsGroup onto the pods that mount the shared
+// volume, which is what lets a non-root image write to it.
 //
 // Only those pods: fsGroup on a pod with no volume changes nothing, and setting
 // it everywhere would roll every service in the environment the first time
@@ -611,20 +611,37 @@ func readinessProbe(spec *devenvv1alpha1.ServiceSpec) *corev1.Probe {
 // makes, so a service can never get the group without the volume or the other
 // way round.
 //
-// Returns nil when there is nothing to say. Note the API server defaults the
-// field and stores `securityContext: {}` either way, so this does not make the
-// local object match the stored one — CreateOrUpdate issues an Update on every
-// reconcile regardless, as it already did before this field existed, because
-// the mutate rebuilds Containers from scratch each pass. The server treats it
-// as a no-op: resourceVersion and generation do not move, and no rollout
-// happens. nil is simply the honest way to say "unset".
-func podSecurityContext(
+// It edits the one field rather than replacing the whole securityContext.
+// Assigning the struct wholesale would strip anything a mutating admission
+// policy had injected — seccomp defaults, runAsNonRoot — on every reconcile,
+// and before this field existed the operator did not touch the struct at all.
+func applyFSGroup(
+	env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec, pod *corev1.PodSpec,
+) {
+	gid := fsGroupFor(env, spec)
+	if gid == nil {
+		// Clear ours without discarding anyone else's: removing the field from
+		// the spec has to take effect, but only on the field we own.
+		if pod.SecurityContext != nil {
+			pod.SecurityContext.FSGroup = nil
+		}
+		return
+	}
+	if pod.SecurityContext == nil {
+		pod.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	pod.SecurityContext.FSGroup = gid
+}
+
+// fsGroupFor returns the GID this service's pod should run with, or nil when
+// the service does not mount the shared volume or no fsGroup was asked for.
+func fsGroupFor(
 	env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec,
-) *corev1.PodSecurityContext {
-	if spec.MountPath == "" || env.Spec.Storage == nil || env.Spec.Storage.FSGroup == nil {
+) *int64 {
+	if spec.MountPath == "" || env.Spec.Storage == nil {
 		return nil
 	}
-	return &corev1.PodSecurityContext{FSGroup: env.Spec.Storage.FSGroup}
+	return env.Spec.Storage.FSGroup
 }
 
 func (r *DevEnvironmentReconciler) volumes(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []corev1.Volume {
@@ -783,18 +800,21 @@ var blockingWaitReasons = map[string]bool{
 // start. It never fails the reconcile: the resources are already correct, and
 // a listing error here costs only detail.
 func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *devenvv1alpha1.DevEnvironment, ns string) []string {
+	// One entry per service: every replica of a service fails the same way, and
+	// repeating it per pod would bury the message.
+	byService := map[string]string{}
+
+	// A failed pod list must not skip the deployment pass below. This is the
+	// uncached read of the two, so it is the likelier to fail — and the stalled
+	// check exists precisely for when the pods have nothing to say.
 	var pods corev1.PodList
 	if err := r.reader().List(ctx, &pods,
 		client.InNamespace(ns),
 		client.MatchingLabels{labelManagedBy: managerName, labelEnvironment: env.Name},
 	); err != nil {
 		logf.FromContext(ctx).Error(err, "listing pods for status detail", "namespace", ns)
-		return nil
 	}
 
-	// One entry per service: every replica of a service fails the same way, and
-	// repeating it per pod would bury the message.
-	byService := map[string]string{}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if !pod.DeletionTimestamp.IsZero() {
