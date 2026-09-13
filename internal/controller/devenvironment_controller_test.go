@@ -185,6 +185,35 @@ func TestReconcileSetsFSGroupOnlyOnServicesThatMountTheVolume(t *testing.T) {
 		"a service that mounts nothing should not get a pod securityContext")
 }
 
+func TestReconcilePreservesAnInjectedSecurityContext(t *testing.T) {
+	// A mutating policy may put things in the pod securityContext. Assigning
+	// the struct wholesale stripped them on every reconcile; only the fsGroup
+	// field is ours to write.
+	gid := int64(65534)
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Storage = &devenvv1alpha1.StorageSpec{Size: resource.MustParse("1Gi"), FSGroup: &gid}
+		e.Spec.Services[0].MountPath = testMountPath
+	}))
+	reconcile(t, r)
+	ctx := context.Background()
+
+	// Stand in for the policy: add a field we do not manage, then reconcile.
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	nonRoot := true
+	deploy.Spec.Template.Spec.SecurityContext.RunAsNonRoot = &nonRoot
+	require.NoError(t, c.Update(ctx, &deploy))
+
+	reconcile(t, r)
+
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	sc := deploy.Spec.Template.Spec.SecurityContext
+	require.NotNil(t, sc)
+	assert.Equal(t, &gid, sc.FSGroup, "ours is still applied")
+	require.NotNil(t, sc.RunAsNonRoot, "theirs must survive the reconcile")
+	assert.True(t, *sc.RunAsNonRoot)
+}
+
 func TestReconcileLeavesSecurityContextUnsetWithoutFSGroup(t *testing.T) {
 	// Asserts nil, which holds here only because the fake client does no
 	// defaulting — a real API server stores `securityContext: {}`. The point
