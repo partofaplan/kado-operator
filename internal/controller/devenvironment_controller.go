@@ -887,11 +887,24 @@ func stalledDetail(d *appsv1.Deployment) string {
 // progressDeadlineExceeded reports whether the Deployment controller has given
 // up waiting for this rollout.
 func progressDeadlineExceeded(d *appsv1.Deployment) bool {
-	// A Deployment the controller has not looked at since the last spec change
-	// still carries the PREVIOUS rollout's conditions. Reading them as current
-	// would report the old failure in the very reconcile that applies the
-	// user's fix, so wait until status has caught up with spec.
+	// Status that has not caught up with spec still describes the PREVIOUS
+	// rollout, so wait for it.
+	//
+	// This narrows the stale window; it does not close it, and it would be
+	// wrong to claim otherwise. Kubernetes' DeploymentTimedOut short-circuits
+	// to true whenever the Progressing reason is ALREADY
+	// ProgressDeadlineExceeded, so the first sync after a spec fix bumps
+	// observedGeneration while carrying the failed condition forward, and
+	// keeps it until the replacement actually becomes ready. A just-corrected
+	// service therefore goes on reporting stalled until it comes up — which is
+	// precisely what Kubernetes itself reports about it, and clears on its own.
 	if d.Status.ObservedGeneration < d.Generation {
+		return false
+	}
+
+	// No pod from the current template exists yet, so whatever the condition
+	// says, it cannot be describing this rollout.
+	if d.Status.UpdatedReplicas == 0 {
 		return false
 	}
 	for i := range d.Status.Conditions {
