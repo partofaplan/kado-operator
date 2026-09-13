@@ -89,6 +89,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- A service whose `readinessProbe` never passes no longer sits at
+  `Provisioning` / `Degraded=False` forever. The container is running and
+  nothing is blocked, so the pod carries no problem to report — but once its
+  Deployment passes `progressDeadlineSeconds`, the environment now reports
+  `Degraded=True` with a `Stalled:` message naming the service. No elapsed-time
+  state of our own: Kubernetes already keeps that clock.
+
 - A Secret named in `secretRefs` or `imagePullSecrets` whose **type** changed
   left the environment permanently `Failed`. The copy in the environment
   namespace could not be updated — `Secret.type` is immutable — so every

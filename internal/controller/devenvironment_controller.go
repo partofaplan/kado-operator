@@ -796,6 +796,22 @@ func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *de
 		}
 	}
 
+	// A pod that is Running but never Ready has nothing wrong with it to
+	// report: no waiting reason, no failed scheduling — it simply never
+	// answers its probe, so the loop above finds nothing and the environment
+	// sits in Provisioning forever (#15).
+	//
+	// Kubernetes already times exactly this. A Deployment that has not
+	// advanced ReadyReplicas within progressDeadlineSeconds — ten minutes by
+	// default — reports Progressing=False with reason ProgressDeadlineExceeded.
+	// Reading that costs no elapsed-time state of our own, and it is the same
+	// clock a person would consult.
+	//
+	// Only for services the pod pass said nothing about: a container in
+	// CrashLoopBackOff trips the deadline too, and "it crashed" explains more
+	// than "it timed out".
+	r.addStalledServices(ctx, env, ns, byService)
+
 	// Emitted in spec order rather than by ranging the map, so the message is
 	// byte-identical across reconciles by construction. Go randomises map
 	// iteration, which would otherwise reshuffle the message on every pass —
@@ -807,6 +823,86 @@ func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *de
 		}
 	}
 	return out
+}
+
+// addStalledServices records services whose Deployment has blown its progress
+// deadline, for any service that does not already have a more specific problem.
+//
+// Listing failures are logged and skipped rather than surfaced: this adds
+// detail to a status that is already being written, and losing the detail is
+// better than failing the reconcile over it — the same call the pod listing
+// above makes.
+func (r *DevEnvironmentReconciler) addStalledServices(
+	ctx context.Context,
+	env *devenvv1alpha1.DevEnvironment,
+	ns string,
+	byService map[string]string,
+) {
+	// r.List, not r.reader(): Deployments are watched by this controller so the
+	// cache already holds them, and pruneServices reads them the same way. The
+	// pod pass above needs the uncached reader only because Pods are
+	// deliberately not watched.
+	var deploys appsv1.DeploymentList
+	if err := r.List(ctx, &deploys,
+		client.InNamespace(ns),
+		client.MatchingLabels{labelManagedBy: managerName, labelEnvironment: env.Name},
+	); err != nil {
+		logf.FromContext(ctx).Error(err, "listing deployments for status detail", "namespace", ns)
+		return
+	}
+
+	for i := range deploys.Items {
+		d := &deploys.Items[i]
+		svc := d.Labels[labelService]
+		if svc == "" || byService[svc] != "" {
+			continue
+		}
+		if !progressDeadlineExceeded(d) {
+			continue
+		}
+		byService[svc] = stalledDetail(d)
+	}
+}
+
+// stalledDetail explains a blown progress deadline without inventing a cause.
+//
+// The deadline says only that no replica became ready in time. The usual
+// reason is a readinessProbe nothing answers, but a ReplicaSet that cannot
+// create pods at all — a quota, an admission webhook — trips the same deadline
+// with no pod for the pass above to find, and reporting a probe problem there
+// would be a fabricated diagnosis that buries the real one. ReplicaFailure
+// carries that reason, so prefer it when Kubernetes has set it.
+func stalledDetail(d *appsv1.Deployment) string {
+	const base = "Stalled: no replica became ready within the deployment's progress deadline"
+	for i := range d.Status.Conditions {
+		c := &d.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+			return fmt.Sprintf("%s; %s: %s", base, c.Reason, c.Message)
+		}
+	}
+	return base + "; if the container is running, its readinessProbe is not passing — " +
+		"check that something listens on the port the probe targets"
+}
+
+// progressDeadlineExceeded reports whether the Deployment controller has given
+// up waiting for this rollout.
+func progressDeadlineExceeded(d *appsv1.Deployment) bool {
+	// A Deployment the controller has not looked at since the last spec change
+	// still carries the PREVIOUS rollout's conditions. Reading them as current
+	// would report the old failure in the very reconcile that applies the
+	// user's fix, so wait until status has caught up with spec.
+	if d.Status.ObservedGeneration < d.Generation {
+		return false
+	}
+	for i := range d.Status.Conditions {
+		c := &d.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentProgressing &&
+			c.Status == corev1.ConditionFalse &&
+			c.Reason == "ProgressDeadlineExceeded" {
+			return true
+		}
+	}
+	return false
 }
 
 // podProblem describes why a pod cannot run, or returns "" if it is healthy or
