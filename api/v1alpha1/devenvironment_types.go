@@ -83,6 +83,25 @@ type ServiceSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
 
+	// registry is the image registry, optionally with a namespace path, that
+	// service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
+	// `registry.internal:5000/mirror`. No scheme, no trailing slash.
+	//
+	// It is prefixed onto a service image that does not already name a
+	// registry of its own, so `redis:7-alpine` becomes
+	// `<registry>/redis:7-alpine` while `quay.io/team/api:1` is left alone.
+	// That is the same rule Docker and Kubernetes use to decide whether the
+	// first path segment is a host, so a service that pins its own registry
+	// keeps it without needing to opt out.
+	//
+	// Overrides spec.registry for this service alone. Leave unset to inherit
+	// it; there is no need to opt out, because an image that names its own
+	// registry is never rewritten.
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	Registry string `json:"registry,omitempty"`
+
 	// port is the container port exposed through the ClusterIP Service.
 	// +required
 	// +kubebuilder:validation:Minimum=1
@@ -151,6 +170,24 @@ type DevEnvironmentSpec struct {
 	// storage requests a shared PersistentVolumeClaim for the environment.
 	// +optional
 	Storage *StorageSpec `json:"storage,omitempty"`
+
+	// registry is the image registry, optionally with a namespace path, that
+	// service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
+	// `registry.internal:5000/mirror`. No scheme, no trailing slash.
+	//
+	// It is prefixed onto a service image that does not already name a
+	// registry of its own, so `redis:7-alpine` becomes
+	// `<registry>/redis:7-alpine` while `quay.io/team/api:1` is left alone.
+	// That is the same rule Docker and Kubernetes use to decide whether the
+	// first path segment is a host, so a service that pins its own registry
+	// keeps it without needing to opt out.
+	//
+	// Leave unset for the default: each image reference is used exactly as
+	// written, which for a bare name means Docker Hub.
+	// +optional
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	Registry string `json:"registry,omitempty"`
 
 	// services are the supporting services deployed into the environment.
 	// +optional

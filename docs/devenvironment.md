@@ -78,6 +78,7 @@ what it is allowed to delete.
 | `owner` | string | — | Person or team the environment belongs to. Stamped on the namespace as a label. |
 | `storage` | [StorageSpec](#storagespec) | — | Requests a shared volume for the environment. |
 | `services` | [[]ServiceSpec](#servicespec) | — | Supporting services to deploy. Keyed by `name`; duplicates are rejected. |
+| `registry` | string | — | Registry (and optional namespace path) for every service's image, e.g. `ghcr.io/myorg`. See [Registries](#registries). |
 | `config` | map[string]string | — | Injected as `<name>-config` and exposed to every service via `envFrom`. |
 
 ### StorageSpec
@@ -104,6 +105,7 @@ silently attempts.
 | `secretRefs` | []string | — | Secrets in the `DevEnvironment`'s **own** namespace, copied into the environment namespace and mounted via `envFrom`. |
 | `mountPath` | string | — | Mounts the shared volume here. Requires `spec.storage`. |
 | `resources` | ResourceRequirements | — | Compute resources for the container. |
+| `registry` | string | — | Overrides `spec.registry` for this service. See [Registries](#registries). |
 | `readinessProbe` | Probe | — | Gates when the service counts as ready. A standard Kubernetes probe; leave the handler empty (`readinessProbe: {}`) for a TCP check against this service's own `port`. See [Readiness](#readiness). |
 
 Put credentials in `secretRefs`, not `env` — `env` values are stored in the
@@ -144,6 +146,51 @@ created, entries removed have their Deployment and Service deleted. Clearing
 released once the namespace is gone, so the record remains visible while
 teardown is in flight. A namespace the operator did not create is left
 untouched and the finalizer is released immediately.
+
+## Registries
+
+By default an image is used exactly as written, so `redis:7-alpine` comes from
+Docker Hub. Set `registry` to pull from somewhere else — a mirror, an internal
+registry, or your own organisation:
+
+```yaml
+spec:
+  registry: ghcr.io/myorg      # every service
+  services:
+    - name: redis
+      image: redis:7-alpine    # -> ghcr.io/myorg/redis:7-alpine
+    - name: postgres
+      image: postgres:16-alpine
+      registry: registry.internal:5000   # -> registry.internal:5000/postgres:16-alpine
+```
+
+A service's own `registry` wins over the environment's. Both accept a host,
+optionally a port, and optionally a namespace path — no scheme and no trailing
+slash, which the CRD enforces.
+
+**An image that already names a registry is left alone.** So a service pinned to
+`quay.io/team/api:1` keeps it even when the environment sets a registry, and
+there is no opt-out flag to remember:
+
+```yaml
+spec:
+  registry: ghcr.io/myorg
+  services:
+    - name: api
+      image: quay.io/team/api:1   # unchanged — it already names a host
+```
+
+The test for "already names a registry" is Docker's own, so it behaves the way
+every other tool does: the first path segment is a host if it contains a dot or
+a colon, or is exactly `localhost`. Two consequences worth knowing:
+
+- `bitnami/redis:7` is a Docker Hub **organisation**, not a host, so it does get
+  prefixed — `ghcr.io/myorg/bitnami/redis:7`.
+- Rewriting is prefix-only. There is no way to redirect `quay.io/team/api` to a
+  mirror through this field, because only you know how your mirror lays those
+  images out. Configure a registry mirror on the nodes for that.
+
+Changing a registry rolls the affected services, as any image change does.
 
 ## Readiness
 

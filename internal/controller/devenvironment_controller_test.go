@@ -865,3 +865,78 @@ func TestReconcileWithAProbeProducesTheSameTemplateTwice(t *testing.T) {
 
 	assert.Equal(t, first.Spec.Template, second.Spec.Template)
 }
+
+func TestImageRef(t *testing.T) {
+	env := func(reg string) *devenvv1alpha1.DevEnvironment {
+		return &devenvv1alpha1.DevEnvironment{
+			Spec: devenvv1alpha1.DevEnvironmentSpec{Registry: reg},
+		}
+	}
+	svc := func(image, reg string) *devenvv1alpha1.ServiceSpec {
+		return &devenvv1alpha1.ServiceSpec{Name: "s", Image: image, Registry: reg}
+	}
+
+	for _, tc := range []struct {
+		name               string
+		envReg, image, reg string
+		want               string
+	}{
+		{"no registry anywhere leaves the image alone",
+			"", "redis:7-alpine", "", "redis:7-alpine"},
+		{"the environment registry applies to a bare image",
+			"ghcr.io/myorg", "redis:7-alpine", "", "ghcr.io/myorg/redis:7-alpine"},
+		{"a service registry overrides the environment's",
+			"ghcr.io/myorg", "redis:7-alpine", "quay.io/other", "quay.io/other/redis:7-alpine"},
+		{"a service with no registry inherits the environment's",
+			"registry.internal:5000", "postgres:16", "", "registry.internal:5000/postgres:16"},
+		{"a service registry works with none set on the environment",
+			"", "redis:7-alpine", "ghcr.io/myorg", "ghcr.io/myorg/redis:7-alpine"},
+
+		// The rule that removes the need for a per-service opt-out.
+		{"an image that already names a registry is never rewritten",
+			"ghcr.io/myorg", "quay.io/team/api:1", "", "quay.io/team/api:1"},
+		{"...even when the service sets its own registry",
+			"", "quay.io/team/api:1", "ghcr.io/myorg", "quay.io/team/api:1"},
+		{"a host with a port counts as a registry",
+			"ghcr.io", "registry.internal:5000/api:1", "", "registry.internal:5000/api:1"},
+		{"localhost counts as a registry",
+			"ghcr.io", "localhost/api:1", "", "localhost/api:1"},
+		{"localhost with a port counts as a registry",
+			"ghcr.io", "localhost:5000/api:1", "", "localhost:5000/api:1"},
+
+		// The other half of Docker's rule: a first segment with no dot or
+		// colon is a Docker Hub org, not a host, so it DOES get prefixed.
+		{"a Docker Hub org is not a registry and is still prefixed",
+			"ghcr.io/myorg", "bitnami/redis:7", "", "ghcr.io/myorg/bitnami/redis:7"},
+		{"a bare name with a tag containing a colon is not a registry",
+			"ghcr.io", "redis:7-alpine", "", "ghcr.io/redis:7-alpine"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, imageRef(env(tc.envReg), svc(tc.image, tc.reg)))
+		})
+	}
+}
+
+func TestReconcileRendersTheResolvedImageOntoTheDeployment(t *testing.T) {
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Registry = "ghcr.io/myorg"
+		e.Spec.Services = append(e.Spec.Services, devenvv1alpha1.ServiceSpec{
+			Name: "postgres", Image: "postgres:16-alpine", Port: 5432,
+			Registry: "registry.internal:5000",
+		}, devenvv1alpha1.ServiceSpec{
+			Name: "api", Image: "quay.io/team/api:1", Port: 8080,
+		})
+	}))
+	ctx := context.Background()
+	reconcile(t, r)
+
+	for name, want := range map[string]string{
+		"redis":    "ghcr.io/myorg/redis:7-alpine",              // inherits the environment
+		"postgres": "registry.internal:5000/postgres:16-alpine", // own override
+		"api":      "quay.io/team/api:1",                        // already has a registry
+	} {
+		var d appsv1.Deployment
+		require.NoError(t, c.Get(ctx, types.NamespacedName{Name: name, Namespace: targetNS}, &d))
+		assert.Equal(t, want, d.Spec.Template.Spec.Containers[0].Image, "service %q", name)
+	}
+}

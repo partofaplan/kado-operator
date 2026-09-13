@@ -127,6 +127,37 @@ var _ = Describe("DevEnvironment", func() {
 		Entry("no probe at all", nil),
 	)
 
+	// The registry pattern is enforced by the API server, not by the
+	// reconciler, so it has to be exercised against a real one. A regex that
+	// silently accepts a scheme would produce `https://ghcr.io/redis:7` as an
+	// image reference and fail at pull time instead of at apply time.
+	DescribeTable("rejects a malformed registry at admission",
+		func(registry string) {
+			env := newResource(uniqueName())
+			env.Spec.Registry = registry
+			Expect(k8sClient.Create(ctx, env)).NotTo(Succeed())
+		},
+		Entry("a scheme", "https://ghcr.io"),
+		Entry("a trailing slash", "ghcr.io/myorg/"),
+		Entry("uppercase", "GHCR.io"),
+		Entry("a leading slash", "/ghcr.io"),
+		Entry("a space", "ghcr.io /myorg"),
+		Entry("an empty path segment", "ghcr.io//myorg"),
+	)
+
+	DescribeTable("accepts a well-formed registry",
+		func(registry string) {
+			env := newResource(uniqueName())
+			env.Spec.Registry = registry
+			Expect(k8sClient.Create(ctx, env)).To(Succeed())
+		},
+		Entry("a bare host", "ghcr.io"),
+		Entry("a host and namespace", "ghcr.io/myorg"),
+		Entry("a host, port and path", "registry.internal:5000/mirror"),
+		Entry("localhost with a port", "localhost:5000"),
+		Entry("a deep path", "ghcr.io/myorg/team/sub"),
+	)
+
 	It("provisions a namespace, deployment and service", func() {
 		name := uniqueName()
 		env := newResource(name)

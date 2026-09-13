@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `spec.registry` and `spec.services[].registry`: choose the registry service
+  images are pulled from, for the whole environment or one service at a time.
+  The service-level field overrides the environment's. An image that already
+  names a registry is never rewritten — using Docker's own rule for what counts
+  as a host — so a service pinned to `quay.io/team/api:1` keeps it and no
+  opt-out flag is needed. Unset leaves every image exactly as written.
+
+### Added
+
 - `.github/workflows/release.yml`: a `workflow_dispatch` release, from `main`
   only, that cuts the next RELEASE version and publishes the package — the
   multi-arch image, the Helm chart, `install.yaml`, the CRD on its own, and a
