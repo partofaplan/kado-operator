@@ -874,14 +874,23 @@ func (r *DevEnvironmentReconciler) addStalledServices(
 // carries that reason, so prefer it when Kubernetes has set it.
 func stalledDetail(d *appsv1.Deployment) string {
 	const base = "Stalled: no replica became ready within the deployment's progress deadline"
-	for i := range d.Status.Conditions {
-		c := &d.Status.Conditions[i]
-		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
-			return fmt.Sprintf("%s; %s: %s", base, c.Reason, c.Message)
-		}
+	if c := replicaFailure(d); c != nil {
+		return fmt.Sprintf("%s; %s: %s", base, c.Reason, c.Message)
 	}
 	return base + "; if the container is running, its readinessProbe is not passing — " +
 		"check that something listens on the port the probe targets"
+}
+
+// replicaFailure returns the Deployment's ReplicaFailure condition when the
+// ReplicaSet cannot create pods at all, or nil.
+func replicaFailure(d *appsv1.Deployment) *appsv1.DeploymentCondition {
+	for i := range d.Status.Conditions {
+		c := &d.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+			return c
+		}
+	}
+	return nil
 }
 
 // progressDeadlineExceeded reports whether the Deployment controller has given
@@ -904,7 +913,14 @@ func progressDeadlineExceeded(d *appsv1.Deployment) bool {
 
 	// No pod from the current template exists yet, so whatever the condition
 	// says, it cannot be describing this rollout.
-	if d.Status.UpdatedReplicas == 0 {
+	//
+	// Unless the reason there are no pods IS the failure. A ResourceQuota or a
+	// denying admission webhook leaves the ReplicaSet at zero replicas
+	// permanently, so UpdatedReplicas never leaves 0 — and suppressing that
+	// puts the environment back in Provisioning / Degraded=False forever with
+	// no pod for the pod pass to inspect either, which is the exact shape #15
+	// exists to fix.
+	if d.Status.UpdatedReplicas == 0 && replicaFailure(d) == nil {
 		return false
 	}
 	for i := range d.Status.Conditions {
