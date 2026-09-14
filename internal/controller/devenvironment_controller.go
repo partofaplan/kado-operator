@@ -605,29 +605,28 @@ func readinessProbe(spec *devenvv1alpha1.ServiceSpec) *corev1.Probe {
 // applyFSGroup carries spec.storage.fsGroup onto the pods that mount the shared
 // volume, which is what lets a non-root image write to it.
 //
-// Only those pods, in both directions. fsGroup on a pod with no volume changes
-// nothing, and setting it everywhere would roll every service in the
-// environment the first time anyone added the field — but the same is true of
-// CLEARING it: a service that mounts nothing is left entirely alone, because
-// wiping a value something else put there would fight whatever put it back,
-// rewriting the pod template on every reconcile forever.
-//
 // It edits the one field rather than replacing the whole securityContext.
-// Assigning the struct wholesale would strip anything a mutating admission
-// policy had injected — seccomp defaults, runAsNonRoot — and before this field
-// existed the operator did not touch the struct at all.
+// Assigning the struct wholesale would strip anything else in it, and before
+// this field existed the operator did not touch the struct at all.
 //
-// On a service that DOES mount the volume, fsGroup is ours: clearing it when
-// the spec no longer asks for one has to work, or removing the field would
-// never take effect. A policy injecting fsGroup onto one of those pods is a
-// genuine conflict over the same field, and the spec wins.
+// fsGroup is cleared whenever this service should not have one — no mountPath,
+// no storage, or storage without an fsGroup. That matters because all three are
+// ordinary edits: dropping `storage` from a spec has to actually remove the
+// group from the pod, and an earlier version that skipped the clear for
+// non-mounting services stranded it on the template forever.
+//
+// The cost is that fsGroup on these pods is owned by the spec, full stop. If a
+// mutating admission policy injects one, the two will fight (#63). Nothing in
+// this repo installs such a policy, and the alternative — never clearing —
+// breaks the ordinary case to protect a hypothetical one.
 func applyFSGroup(
 	env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec, pod *corev1.PodSpec,
 ) {
-	if spec.MountPath == "" || env.Spec.Storage == nil {
-		return
+	var gid *int64
+	if spec.MountPath != "" && env.Spec.Storage != nil {
+		gid = env.Spec.Storage.FSGroup
 	}
-	gid := env.Spec.Storage.FSGroup
+
 	if gid == nil {
 		if pod.SecurityContext != nil {
 			pod.SecurityContext.FSGroup = nil

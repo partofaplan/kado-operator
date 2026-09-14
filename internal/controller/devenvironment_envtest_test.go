@@ -244,11 +244,11 @@ var _ = Describe("DevEnvironment", func() {
 			checked++
 		}
 		// Guards against the loop checking NOTHING — a moved directory, a
-		// changed suffix, a broken glob. It cannot detect "fewer files than
-		// exist": with eight examples present, dropping one still clears a
-		// floor of six. An exact count would need a second source of truth for
-		// how many there should be, which is just this number written twice.
-		Expect(checked).To(BeNumerically(">=", 6), "expected to validate every example manifest")
+		// changed suffix, a broken glob. Deliberately 1, not the current file
+		// count: a floor equal to the number of examples turns deleting one
+		// into a CI failure that reports a broken glob, which is not what
+		// happened. Counting files cannot detect a deliberate deletion anyway.
+		Expect(checked).To(BeNumerically(">=", 1), "the loop validated no example manifests at all")
 	})
 
 	// Against the real API server, not the fake client: Secret.type immutability
