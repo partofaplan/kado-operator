@@ -185,6 +185,30 @@ func TestReconcileSetsFSGroupOnlyOnServicesThatMountTheVolume(t *testing.T) {
 		"a service that mounts nothing should not get a pod securityContext")
 }
 
+func TestReconcileLeavesANonMountingServicesSecurityContextAlone(t *testing.T) {
+	// Clearing fsGroup on a pod we do not manage would fight whatever put it
+	// there: the policy re-injects on the Update, and the pod template flips
+	// on every reconcile forever.
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Storage = &devenvv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}
+	}))
+	reconcile(t, r)
+	ctx := context.Background()
+
+	injected := int64(1234)
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	deploy.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{FSGroup: &injected}
+	require.NoError(t, c.Update(ctx, &deploy))
+
+	reconcile(t, r)
+
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	require.NotNil(t, deploy.Spec.Template.Spec.SecurityContext)
+	assert.Equal(t, &injected, deploy.Spec.Template.Spec.SecurityContext.FSGroup,
+		"redis mounts nothing here, so its fsGroup is not ours to clear")
+}
+
 func TestReconcilePreservesAnInjectedSecurityContext(t *testing.T) {
 	// A mutating policy may put things in the pod securityContext. Assigning
 	// the struct wholesale stripped them on every reconcile; only the fsGroup

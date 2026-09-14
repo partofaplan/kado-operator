@@ -605,23 +605,30 @@ func readinessProbe(spec *devenvv1alpha1.ServiceSpec) *corev1.Probe {
 // applyFSGroup carries spec.storage.fsGroup onto the pods that mount the shared
 // volume, which is what lets a non-root image write to it.
 //
-// Only those pods: fsGroup on a pod with no volume changes nothing, and setting
-// it everywhere would roll every service in the environment the first time
-// anyone added the field. The mount test is deliberately the same one volumes()
-// makes, so a service can never get the group without the volume or the other
-// way round.
+// Only those pods, in both directions. fsGroup on a pod with no volume changes
+// nothing, and setting it everywhere would roll every service in the
+// environment the first time anyone added the field — but the same is true of
+// CLEARING it: a service that mounts nothing is left entirely alone, because
+// wiping a value something else put there would fight whatever put it back,
+// rewriting the pod template on every reconcile forever.
 //
 // It edits the one field rather than replacing the whole securityContext.
 // Assigning the struct wholesale would strip anything a mutating admission
-// policy had injected — seccomp defaults, runAsNonRoot — on every reconcile,
-// and before this field existed the operator did not touch the struct at all.
+// policy had injected — seccomp defaults, runAsNonRoot — and before this field
+// existed the operator did not touch the struct at all.
+//
+// On a service that DOES mount the volume, fsGroup is ours: clearing it when
+// the spec no longer asks for one has to work, or removing the field would
+// never take effect. A policy injecting fsGroup onto one of those pods is a
+// genuine conflict over the same field, and the spec wins.
 func applyFSGroup(
 	env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec, pod *corev1.PodSpec,
 ) {
-	gid := fsGroupFor(env, spec)
+	if spec.MountPath == "" || env.Spec.Storage == nil {
+		return
+	}
+	gid := env.Spec.Storage.FSGroup
 	if gid == nil {
-		// Clear ours without discarding anyone else's: removing the field from
-		// the spec has to take effect, but only on the field we own.
 		if pod.SecurityContext != nil {
 			pod.SecurityContext.FSGroup = nil
 		}
@@ -631,17 +638,6 @@ func applyFSGroup(
 		pod.SecurityContext = &corev1.PodSecurityContext{}
 	}
 	pod.SecurityContext.FSGroup = gid
-}
-
-// fsGroupFor returns the GID this service's pod should run with, or nil when
-// the service does not mount the shared volume or no fsGroup was asked for.
-func fsGroupFor(
-	env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec,
-) *int64 {
-	if spec.MountPath == "" || env.Spec.Storage == nil {
-		return nil
-	}
-	return env.Spec.Storage.FSGroup
 }
 
 func (r *DevEnvironmentReconciler) volumes(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []corev1.Volume {
@@ -807,12 +803,14 @@ func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *de
 	// A failed pod list must not skip the deployment pass below. This is the
 	// uncached read of the two, so it is the likelier to fail — and the stalled
 	// check exists precisely for when the pods have nothing to say.
+	podsKnown := true
 	var pods corev1.PodList
 	if err := r.reader().List(ctx, &pods,
 		client.InNamespace(ns),
 		client.MatchingLabels{labelManagedBy: managerName, labelEnvironment: env.Name},
 	); err != nil {
 		logf.FromContext(ctx).Error(err, "listing pods for status detail", "namespace", ns)
+		podsKnown = false
 	}
 
 	for i := range pods.Items {
@@ -843,7 +841,7 @@ func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *de
 	// Only for services the pod pass said nothing about: a container in
 	// CrashLoopBackOff trips the deadline too, and "it crashed" explains more
 	// than "it timed out".
-	r.addStalledServices(ctx, env, ns, byService)
+	r.addStalledServices(ctx, env, ns, byService, podsKnown)
 
 	// Emitted in spec order rather than by ranging the map, so the message is
 	// byte-identical across reconciles by construction. Go randomises map
@@ -870,6 +868,7 @@ func (r *DevEnvironmentReconciler) addStalledServices(
 	env *devenvv1alpha1.DevEnvironment,
 	ns string,
 	byService map[string]string,
+	podsKnown bool,
 ) {
 	// r.List, not r.reader(): Deployments are watched by this controller so the
 	// cache already holds them, and pruneServices reads them the same way. The
@@ -893,7 +892,7 @@ func (r *DevEnvironmentReconciler) addStalledServices(
 		if !progressDeadlineExceeded(d) {
 			continue
 		}
-		byService[svc] = stalledDetail(d)
+		byService[svc] = stalledDetail(d, podsKnown)
 	}
 }
 
@@ -905,10 +904,16 @@ func (r *DevEnvironmentReconciler) addStalledServices(
 // with no pod for the pass above to find, and reporting a probe problem there
 // would be a fabricated diagnosis that buries the real one. ReplicaFailure
 // carries that reason, so prefer it when Kubernetes has set it.
-func stalledDetail(d *appsv1.Deployment) string {
+func stalledDetail(d *appsv1.Deployment, podsKnown bool) string {
 	const base = "Stalled: no replica became ready within the deployment's progress deadline"
 	if c := replicaFailure(d); c != nil {
 		return fmt.Sprintf("%s; %s: %s", base, c.Reason, c.Message)
+	}
+	if !podsKnown {
+		// The pod listing failed, so the pod pass proved nothing about these
+		// services. A crash-looping container would reach here and be labelled
+		// a probe problem, which is a guess dressed as a diagnosis.
+		return base + "; the pods could not be read, so the cause is unknown"
 	}
 	return base + "; if the container is running, its readinessProbe is not passing — " +
 		"check that something listens on the port the probe targets"

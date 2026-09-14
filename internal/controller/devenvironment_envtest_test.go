@@ -243,10 +243,11 @@ var _ = Describe("DevEnvironment", func() {
 				To(Succeed(), "examples/%s is not valid against the CRD", e.Name())
 			checked++
 		}
-		// Guards against the loop silently checking nothing — or fewer files
-		// than exist — if the directory moves or one is dropped by accident.
-		// Raise this when adding an example; it failing on a deliberate
-		// removal is the point.
+		// Guards against the loop checking NOTHING — a moved directory, a
+		// changed suffix, a broken glob. It cannot detect "fewer files than
+		// exist": with eight examples present, dropping one still clears a
+		// floor of six. An exact count would need a second source of truth for
+		// how many there should be, which is just this number written twice.
 		Expect(checked).To(BeNumerically(">=", 6), "expected to validate every example manifest")
 	})
 
