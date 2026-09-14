@@ -294,8 +294,36 @@ func (r *DevEnvironmentReconciler) reconcileSecrets(ctx context.Context, env *de
 			)
 		}
 
+		// Secret.type is immutable, so an existing copy whose type no longer
+		// matches the source can never be updated into agreement — every
+		// reconcile from then on fails with "field is immutable" and the
+		// environment stays Failed forever. Worse, the error names a Secret in
+		// the environment namespace that the user never created, so the obvious
+		// fixes (editing or recreating the *source*) all appear to do nothing.
+		// Reachable whenever a Secret is repurposed — notably when one named in
+		// imagePullSecrets is recreated as dockerconfigjson after being
+		// rejected for its type (#48).
+		replaced, err := r.replaceOnTypeChange(ctx, env, name, ns, src.Type)
+		if err != nil {
+			return err
+		}
+
+		if replaced {
+			// Create, not CreateOrUpdate: the latter reads through the
+			// manager's cache, which still holds the Secret just deleted, so it
+			// would take the Update branch and fail NotFound.
+			fresh := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+			fresh.Labels = r.labels(env, "")
+			fresh.Type = src.Type
+			fresh.Data = maps.Clone(src.Data)
+			if err := r.Create(ctx, fresh); err != nil {
+				return fmt.Errorf("recreating secret %q after its type changed: %w", name, err)
+			}
+			continue
+		}
+
 		dst := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
-		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dst, func() error {
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, dst, func() error {
 			dst.Labels = r.labels(env, "")
 			dst.Type = src.Type
 			dst.Data = maps.Clone(src.Data)
@@ -306,6 +334,70 @@ func (r *DevEnvironmentReconciler) reconcileSecrets(ctx context.Context, env *de
 		}
 	}
 	return nil
+}
+
+// replaceOnTypeChange deletes an already-copied Secret whose type differs from
+// the source's, so it can be recreated with the new type. Reports whether it
+// deleted anything. A no-op when there is no copy yet or its type agrees.
+func (r *DevEnvironmentReconciler) replaceOnTypeChange(
+	ctx context.Context,
+	env *devenvv1alpha1.DevEnvironment,
+	name, ns string,
+	want corev1.SecretType,
+) (bool, error) {
+	// reader(), not Get: in production Client reads through the manager's
+	// cache, and acting on a stale copy here would mean deleting a Secret that
+	// is already correct.
+	var existing corev1.Secret
+	err := r.reader().Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &existing)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading copied secret %q: %w", name, err)
+	}
+	// Ownership is checked before the type comparison, not after it. Anything
+	// already sitting at this name has to be ours before we write to it at
+	// all: the environment namespace is somewhere developers deploy into, so a
+	// same-named Secret from cert-manager or from a person is entirely
+	// possible. Checking only on the type-mismatch path left the commoner case
+	// — a foreign Secret that happens to have the same type — falling through
+	// to CreateOrUpdate, which overwrites its data and stamps it
+	// operator-managed, after which the finalizer deletes it on teardown.
+	if !r.owns(env, &existing) {
+		return false, fmt.Errorf(
+			"secret %q in namespace %q already exists and is not managed by this DevEnvironment; "+
+				"rename the reference or remove that secret",
+			name, ns,
+		)
+	}
+
+	if existing.Type == want {
+		return false, nil
+	}
+
+	// Guard on UID: between the read above and this delete another reconcile
+	// may already have replaced the copy, and deleting the correct one would
+	// undo that. Secrets carry no finalizers, so the delete completes before
+	// the caller recreates.
+	if err := r.Delete(ctx, &existing, client.Preconditions{UID: &existing.UID}); err != nil {
+		switch {
+		case apierrors.IsNotFound(err):
+			// Already gone. Report it as replaced so the caller Creates: the
+			// alternative routes it into CreateOrUpdate, whose cached Get can
+			// still return this Secret and turn the write into an Update that
+			// fails NotFound — the very path the replaced branch avoids.
+			return true, nil
+		case apierrors.IsConflict(err):
+			// A different object now holds this name, so everything read above
+			// is stale. Requeue and start from a fresh read rather than
+			// guessing which of the two is current.
+			return false, fmt.Errorf("secret %q changed while being replaced: %w", name, err)
+		default:
+			return false, fmt.Errorf("replacing secret %q after its type changed to %q: %w", name, want, err)
+		}
+	}
+	return true, nil
 }
 
 // reconcilePVC provisions the environment's shared volume. PVC specs are
@@ -371,6 +463,7 @@ func (r *DevEnvironmentReconciler) reconcileService(
 		deploy.Spec.Template.Spec.Containers = []corev1.Container{r.container(env, spec)}
 		deploy.Spec.Template.Spec.Volumes = r.volumes(env, spec)
 		deploy.Spec.Template.Spec.ImagePullSecrets = pullSecretRefs(env, spec)
+		applyFSGroup(env, spec, &deploy.Spec.Template.Spec)
 		return nil
 	})
 	if err != nil {
@@ -507,6 +600,43 @@ func readinessProbe(spec *devenvv1alpha1.ServiceSpec) *corev1.Probe {
 		}
 	}
 	return probe
+}
+
+// applyFSGroup carries spec.storage.fsGroup onto the pods that mount the shared
+// volume, which is what lets a non-root image write to it.
+//
+// It edits the one field rather than replacing the whole securityContext.
+// Assigning the struct wholesale would strip anything else in it, and before
+// this field existed the operator did not touch the struct at all.
+//
+// fsGroup is cleared whenever this service should not have one — no mountPath,
+// no storage, or storage without an fsGroup. That matters because all three are
+// ordinary edits: dropping `storage` from a spec has to actually remove the
+// group from the pod, and an earlier version that skipped the clear for
+// non-mounting services stranded it on the template forever.
+//
+// The cost is that fsGroup on these pods is owned by the spec, full stop. If a
+// mutating admission policy injects one, the two will fight (#63). Nothing in
+// this repo installs such a policy, and the alternative — never clearing —
+// breaks the ordinary case to protect a hypothetical one.
+func applyFSGroup(
+	env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec, pod *corev1.PodSpec,
+) {
+	var gid *int64
+	if spec.MountPath != "" && env.Spec.Storage != nil {
+		gid = env.Spec.Storage.FSGroup
+	}
+
+	if gid == nil {
+		if pod.SecurityContext != nil {
+			pod.SecurityContext.FSGroup = nil
+		}
+		return
+	}
+	if pod.SecurityContext == nil {
+		pod.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	pod.SecurityContext.FSGroup = gid
 }
 
 func (r *DevEnvironmentReconciler) volumes(env *devenvv1alpha1.DevEnvironment, spec *devenvv1alpha1.ServiceSpec) []corev1.Volume {
@@ -665,18 +795,23 @@ var blockingWaitReasons = map[string]bool{
 // start. It never fails the reconcile: the resources are already correct, and
 // a listing error here costs only detail.
 func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *devenvv1alpha1.DevEnvironment, ns string) []string {
+	// One entry per service: every replica of a service fails the same way, and
+	// repeating it per pod would bury the message.
+	byService := map[string]string{}
+
+	// A failed pod list must not skip the deployment pass below. This is the
+	// uncached read of the two, so it is the likelier to fail — and the stalled
+	// check exists precisely for when the pods have nothing to say.
+	podsKnown := true
 	var pods corev1.PodList
 	if err := r.reader().List(ctx, &pods,
 		client.InNamespace(ns),
 		client.MatchingLabels{labelManagedBy: managerName, labelEnvironment: env.Name},
 	); err != nil {
 		logf.FromContext(ctx).Error(err, "listing pods for status detail", "namespace", ns)
-		return nil
+		podsKnown = false
 	}
 
-	// One entry per service: every replica of a service fails the same way, and
-	// repeating it per pod would bury the message.
-	byService := map[string]string{}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if !pod.DeletionTimestamp.IsZero() {
@@ -691,6 +826,22 @@ func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *de
 		}
 	}
 
+	// A pod that is Running but never Ready has nothing wrong with it to
+	// report: no waiting reason, no failed scheduling — it simply never
+	// answers its probe, so the loop above finds nothing and the environment
+	// sits in Provisioning forever (#15).
+	//
+	// Kubernetes already times exactly this. A Deployment that has not
+	// advanced ReadyReplicas within progressDeadlineSeconds — ten minutes by
+	// default — reports Progressing=False with reason ProgressDeadlineExceeded.
+	// Reading that costs no elapsed-time state of our own, and it is the same
+	// clock a person would consult.
+	//
+	// Only for services the pod pass said nothing about: a container in
+	// CrashLoopBackOff trips the deadline too, and "it crashed" explains more
+	// than "it timed out".
+	r.addStalledServices(ctx, env, ns, byService, podsKnown)
+
 	// Emitted in spec order rather than by ranging the map, so the message is
 	// byte-identical across reconciles by construction. Go randomises map
 	// iteration, which would otherwise reshuffle the message on every pass —
@@ -702,6 +853,122 @@ func (r *DevEnvironmentReconciler) workloadProblems(ctx context.Context, env *de
 		}
 	}
 	return out
+}
+
+// addStalledServices records services whose Deployment has blown its progress
+// deadline, for any service that does not already have a more specific problem.
+//
+// Listing failures are logged and skipped rather than surfaced: this adds
+// detail to a status that is already being written, and losing the detail is
+// better than failing the reconcile over it — the same call the pod listing
+// above makes.
+func (r *DevEnvironmentReconciler) addStalledServices(
+	ctx context.Context,
+	env *devenvv1alpha1.DevEnvironment,
+	ns string,
+	byService map[string]string,
+	podsKnown bool,
+) {
+	// r.List, not r.reader(): Deployments are watched by this controller so the
+	// cache already holds them, and pruneServices reads them the same way. The
+	// pod pass above needs the uncached reader only because Pods are
+	// deliberately not watched.
+	var deploys appsv1.DeploymentList
+	if err := r.List(ctx, &deploys,
+		client.InNamespace(ns),
+		client.MatchingLabels{labelManagedBy: managerName, labelEnvironment: env.Name},
+	); err != nil {
+		logf.FromContext(ctx).Error(err, "listing deployments for status detail", "namespace", ns)
+		return
+	}
+
+	for i := range deploys.Items {
+		d := &deploys.Items[i]
+		svc := d.Labels[labelService]
+		if svc == "" || byService[svc] != "" {
+			continue
+		}
+		if !progressDeadlineExceeded(d) {
+			continue
+		}
+		byService[svc] = stalledDetail(d, podsKnown)
+	}
+}
+
+// stalledDetail explains a blown progress deadline without inventing a cause.
+//
+// The deadline says only that no replica became ready in time. The usual
+// reason is a readinessProbe nothing answers, but a ReplicaSet that cannot
+// create pods at all — a quota, an admission webhook — trips the same deadline
+// with no pod for the pass above to find, and reporting a probe problem there
+// would be a fabricated diagnosis that buries the real one. ReplicaFailure
+// carries that reason, so prefer it when Kubernetes has set it.
+func stalledDetail(d *appsv1.Deployment, podsKnown bool) string {
+	const base = "Stalled: no replica became ready within the deployment's progress deadline"
+	if c := replicaFailure(d); c != nil {
+		return fmt.Sprintf("%s; %s: %s", base, c.Reason, c.Message)
+	}
+	if !podsKnown {
+		// The pod listing failed, so the pod pass proved nothing about these
+		// services. A crash-looping container would reach here and be labelled
+		// a probe problem, which is a guess dressed as a diagnosis.
+		return base + "; the pods could not be read, so the cause is unknown"
+	}
+	return base + "; if the container is running, its readinessProbe is not passing — " +
+		"check that something listens on the port the probe targets"
+}
+
+// replicaFailure returns the Deployment's ReplicaFailure condition when the
+// ReplicaSet cannot create pods at all, or nil.
+func replicaFailure(d *appsv1.Deployment) *appsv1.DeploymentCondition {
+	for i := range d.Status.Conditions {
+		c := &d.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+			return c
+		}
+	}
+	return nil
+}
+
+// progressDeadlineExceeded reports whether the Deployment controller has given
+// up waiting for this rollout.
+func progressDeadlineExceeded(d *appsv1.Deployment) bool {
+	// Status that has not caught up with spec still describes the PREVIOUS
+	// rollout, so wait for it.
+	//
+	// This narrows the stale window; it does not close it, and it would be
+	// wrong to claim otherwise. Kubernetes' DeploymentTimedOut short-circuits
+	// to true whenever the Progressing reason is ALREADY
+	// ProgressDeadlineExceeded, so the first sync after a spec fix bumps
+	// observedGeneration while carrying the failed condition forward, and
+	// keeps it until the replacement actually becomes ready. A just-corrected
+	// service therefore goes on reporting stalled until it comes up — which is
+	// precisely what Kubernetes itself reports about it, and clears on its own.
+	if d.Status.ObservedGeneration < d.Generation {
+		return false
+	}
+
+	// No pod from the current template exists yet, so whatever the condition
+	// says, it cannot be describing this rollout.
+	//
+	// Unless the reason there are no pods IS the failure. A ResourceQuota or a
+	// denying admission webhook leaves the ReplicaSet at zero replicas
+	// permanently, so UpdatedReplicas never leaves 0 — and suppressing that
+	// puts the environment back in Provisioning / Degraded=False forever with
+	// no pod for the pod pass to inspect either, which is the exact shape #15
+	// exists to fix.
+	if d.Status.UpdatedReplicas == 0 && replicaFailure(d) == nil {
+		return false
+	}
+	for i := range d.Status.Conditions {
+		c := &d.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentProgressing &&
+			c.Status == corev1.ConditionFalse &&
+			c.Reason == "ProgressDeadlineExceeded" {
+			return true
+		}
+	}
+	return false
 }
 
 // podProblem describes why a pod cannot run, or returns "" if it is healthy or

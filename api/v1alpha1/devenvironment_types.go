@@ -65,6 +65,35 @@ type StorageSpec struct {
 	// +optional
 	// +listType=atomic
 	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
+
+	// fsGroup makes the volume group-owned by this GID, so a container that
+	// does not run as root can write to it.
+	//
+	// Without it the volume is presented as the provisioner leaves it —
+	// root:root 0755 on most CSI drivers, EBS and GCE PD — and an image
+	// running as a non-root user fails with "permission denied". Images that
+	// start as root and chown their own data directory (postgres, mysql,
+	// mongo) do not need this; ones that do not (prometheus runs as nobody,
+	// grafana as 472) do.
+	//
+	// Set it to the GID the image runs as. Kubernetes then chowns the volume
+	// to root:<fsGroup> with group write, and adds the GID to the container's
+	// supplementary groups.
+	//
+	// Applies only to services that actually mount the volume, so adding it
+	// does not restart anything else. It does roll the service that mounts it,
+	// and that is the one rollout which can deadlock on a single-attach CSI
+	// driver: the replacement pod wants the ReadWriteOnce claim while the old
+	// pod still holds it (#51). On such a cluster, recreate the environment
+	// rather than editing this field in place.
+	//
+	// A cluster whose StorageClass happens to mount 0777, such as k3s
+	// local-path, works without it — which is why the need for it usually
+	// surfaces only on a second cluster.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=2147483647
+	FSGroup *int64 `json:"fsGroup,omitempty"`
 }
 
 // ServiceSpec describes one supporting service (database, cache, queue, ...)
@@ -83,9 +112,28 @@ type ServiceSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
 
+	// The port alternation in the pattern below reads as 1-65535: 65530-65535,
+	// 65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999.
+	// `[0-9]{1,5}` let `:0` and `:99999` through to fail at pull time, which
+	// is the failure this validation exists to prevent (#21). Only the
+	// canonical spelling passes — `:0080` is rejected even though Docker's
+	// grammar allows it and Go resolves it to 80.
+	//
+	// A CEL rule would read better and was tried first. It is affordable on
+	// the environment-level field but not on the per-service one, which sits
+	// inside the unbounded services array: there the cost estimator rejected
+	// the CRD outright. Bounding that array to afford the rule would impose a
+	// service-count limit as a side effect of a port check. Both fields keep
+	// the same pattern so neither can drift.
+	//
+	// Deliberately NOT part of the doc comment below: controller-gen folds
+	// that into the CRD description, and `kubectl explain` should not carry
+	// regex construction notes.
+
 	// registry is the image registry, optionally with a namespace path, that
 	// service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
-	// `registry.internal:5000/mirror`. No scheme, no trailing slash.
+	// `registry.internal:5000/mirror`. No scheme, no trailing slash, and a
+	// port, if given, must be between 1 and 65535.
 	//
 	// It is prefixed onto a service image that does not already name a
 	// registry of its own, so `redis:7-alpine` becomes
@@ -99,7 +147,7 @@ type ServiceSpec struct {
 	// registry is never rewritten.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
-	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
 	Registry string `json:"registry,omitempty"`
 
 	// port is the container port exposed through the ClusterIP Service.
@@ -194,9 +242,28 @@ type DevEnvironmentSpec struct {
 	// +optional
 	Storage *StorageSpec `json:"storage,omitempty"`
 
+	// The port alternation in the pattern below reads as 1-65535: 65530-65535,
+	// 65500-65529, 65000-65499, 60000-64999, 10000-59999, then 1-9999.
+	// `[0-9]{1,5}` let `:0` and `:99999` through to fail at pull time, which
+	// is the failure this validation exists to prevent (#21). Only the
+	// canonical spelling passes — `:0080` is rejected even though Docker's
+	// grammar allows it and Go resolves it to 80.
+	//
+	// A CEL rule would read better and was tried first. It is affordable on
+	// the environment-level field but not on the per-service one, which sits
+	// inside the unbounded services array: there the cost estimator rejected
+	// the CRD outright. Bounding that array to afford the rule would impose a
+	// service-count limit as a side effect of a port check. Both fields keep
+	// the same pattern so neither can drift.
+	//
+	// Deliberately NOT part of the doc comment below: controller-gen folds
+	// that into the CRD description, and `kubectl explain` should not carry
+	// regex construction notes.
+
 	// registry is the image registry, optionally with a namespace path, that
 	// service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
-	// `registry.internal:5000/mirror`. No scheme, no trailing slash.
+	// `registry.internal:5000/mirror`. No scheme, no trailing slash, and a
+	// port, if given, must be between 1 and 65535.
 	//
 	// It is prefixed onto a service image that does not already name a
 	// registry of its own, so `redis:7-alpine` becomes
@@ -209,7 +276,7 @@ type DevEnvironmentSpec struct {
 	// written, which for a bare name means Docker Hub.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
-	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$`
 	Registry string `json:"registry,omitempty"`
 
 	// imagePullSecrets names docker-registry Secrets in the DevEnvironment's

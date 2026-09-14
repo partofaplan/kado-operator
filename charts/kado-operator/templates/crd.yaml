@@ -107,7 +107,8 @@ spec:
                 description: |-
                   registry is the image registry, optionally with a namespace path, that
                   service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
-                  `registry.internal:5000/mirror`. No scheme, no trailing slash.
+                  `registry.internal:5000/mirror`. No scheme, no trailing slash, and a
+                  port, if given, must be between 1 and 65535.
 
                   It is prefixed onto a service image that does not already name a
                   registry of its own, so `redis:7-alpine` becomes
@@ -119,7 +120,7 @@ spec:
                   Leave unset for the default: each image reference is used exactly as
                   written, which for a bare name means Docker Hub.
                 maxLength: 255
-                pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
+                pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
                 type: string
               services:
                 description: services are the supporting services deployed into the
@@ -350,7 +351,8 @@ spec:
                       description: |-
                         registry is the image registry, optionally with a namespace path, that
                         service images are pulled from — `ghcr.io`, `ghcr.io/myorg`, or
-                        `registry.internal:5000/mirror`. No scheme, no trailing slash.
+                        `registry.internal:5000/mirror`. No scheme, no trailing slash, and a
+                        port, if given, must be between 1 and 65535.
 
                         It is prefixed onto a service image that does not already name a
                         registry of its own, so `redis:7-alpine` becomes
@@ -363,7 +365,7 @@ spec:
                         it; there is no need to opt out, because an image that names its own
                         registry is never rewritten.
                       maxLength: 255
-                      pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]{1,5})?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
+                      pattern: ^$|^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*$
                       type: string
                     replicas:
                       default: 1
@@ -458,6 +460,36 @@ spec:
                       type: string
                     type: array
                     x-kubernetes-list-type: atomic
+                  fsGroup:
+                    description: |-
+                      fsGroup makes the volume group-owned by this GID, so a container that
+                      does not run as root can write to it.
+
+                      Without it the volume is presented as the provisioner leaves it —
+                      root:root 0755 on most CSI drivers, EBS and GCE PD — and an image
+                      running as a non-root user fails with "permission denied". Images that
+                      start as root and chown their own data directory (postgres, mysql,
+                      mongo) do not need this; ones that do not (prometheus runs as nobody,
+                      grafana as 472) do.
+
+                      Set it to the GID the image runs as. Kubernetes then chowns the volume
+                      to root:<fsGroup> with group write, and adds the GID to the container's
+                      supplementary groups.
+
+                      Applies only to services that actually mount the volume, so adding it
+                      does not restart anything else. It does roll the service that mounts it,
+                      and that is the one rollout which can deadlock on a single-attach CSI
+                      driver: the replacement pod wants the ReadWriteOnce claim while the old
+                      pod still holds it (#51). On such a cluster, recreate the environment
+                      rather than editing this field in place.
+
+                      A cluster whose StorageClass happens to mount 0777, such as k3s
+                      local-path, works without it — which is why the need for it usually
+                      surfaces only on a second cluster.
+                    format: int64
+                    maximum: 2147483647
+                    minimum: 1
+                    type: integer
                   size:
                     anyOf:
                     - type: integer

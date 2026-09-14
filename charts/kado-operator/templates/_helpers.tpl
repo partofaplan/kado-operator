@@ -45,6 +45,35 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
+{{- define "kado-operator.imageTag" -}}
+{{- default .Chart.AppVersion .Values.image.tag }}
+{{- end }}
+
 {{- define "kado-operator.image" -}}
-{{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) }}
+{{- printf "%s:%s" .Values.image.repository (include "kado-operator.imageTag" .) }}
+{{- end }}
+
+{{/*
+Pull policy. An explicit image.pullPolicy always wins; empty means "decide from
+the tag", which is what Kubernetes itself does for a bare pod spec.
+
+This matters because the chart's own appVersion is "latest" (#18). A moving tag
+with IfNotPresent means a node that already cached an older "latest" keeps
+running it, and `helm upgrade` reports success while changing nothing.
+
+The rule is Kubernetes' own — the literal string "latest" — and deliberately
+not a general moving-tag detector. Nothing in an image reference says whether a
+tag moves: a `dev` tag pushed to a registry wants Always, while the same `dev`
+tag side-loaded onto a node wants Never, and the chart cannot tell those apart.
+Anything other than "latest" therefore needs an explicit image.pullPolicy, and
+the side-load flow in docs/development.md sets Never for exactly this reason.
+*/}}
+{{- define "kado-operator.pullPolicy" -}}
+{{- if .Values.image.pullPolicy -}}
+{{- .Values.image.pullPolicy -}}
+{{- else if eq (include "kado-operator.imageTag" .) "latest" -}}
+Always
+{{- else -}}
+IfNotPresent
+{{- end -}}
 {{- end }}

@@ -1,0 +1,48 @@
+# Mailpit and Memcached — catch the mail your application sends instead of
+# delivering it, and give it a cache to talk to.
+#
+#   kubectl apply -f examples/mail-sandbox.yaml
+#   kubectl -n mail-sandbox port-forward svc/mailpit 8025:8025   # then localhost:8025
+#
+# A service exposes ONE port, and this one publishes the web inbox (8025), so
+# the Service and its readiness probe target something a browser can use.
+#
+# That means `mailpit:1025` does NOT resolve to SMTP — the ClusterIP has no
+# rule for it and a send is refused. Mailpit still listens on 1025 inside the
+# pod, so reach it by pod IP, or forward it:
+#
+#   kubectl -n mail-sandbox port-forward deploy/mailpit 1025:1025
+#
+# then point your SMTP client at localhost:1025, no credentials, no TLS.
+# Nothing leaves the cluster; every message lands in the web inbox.
+apiVersion: devenv.aviture.dev/v1alpha1
+kind: DevEnvironment
+metadata:
+  name: mail-sandbox
+  namespace: default
+spec:
+  owner: web-team
+
+  config:
+    LOG_LEVEL: debug
+    ENVIRONMENT: development
+
+  services:
+    - name: mailpit
+      image: axllent/mailpit:v1.21
+      port: 8025
+      env:
+        MP_SMTP_AUTH_ACCEPT_ANY: "true"
+        MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 200m, memory: 256Mi }
+
+    - name: memcached
+      image: memcached:1.6-alpine
+      port: 11211
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 200m, memory: 128Mi }

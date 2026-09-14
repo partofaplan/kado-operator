@@ -8,6 +8,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- The chart derives `image.pullPolicy` from the tag instead of always sending
+  `IfNotPresent`: `Always` for the literal `latest`, `IfNotPresent` otherwise.
+  The chart's own appVersion is `latest`, so a default install previously
+  installed a moving tag with caching on, and a node holding an older `latest`
+  kept running it while `helm upgrade` reported success. Setting
+  `image.pullPolicy` explicitly still overrides, which side-loading relies on.
+
+- `spec.storage.fsGroup`: makes the shared volume group-owned by a given GID so
+  a container that does not run as root can write to it. Without it the volume
+  is presented as the provisioner leaves it — `root:root 0755` on most CSI
+  drivers, EBS and GCE PD — and a non-root image fails with "permission
+  denied". Applies only to services that mount the volume.
+
 - `spec.imagePullSecrets` and `spec.services[].imagePullSecrets`: authenticate
   to a private registry. Names docker-registry Secrets in the `DevEnvironment`'s
   own namespace, which are copied into the environment namespace alongside
@@ -73,6 +86,21 @@ All notable changes to this project are documented here. The format follows
   `cluster-load`, `test-integration-local`) selectable with
   `LOCAL_PROVIDER=k3d|kind|minikube`.
 
+
+### Fixed
+
+- A service whose `readinessProbe` never passes no longer sits at
+  `Provisioning` / `Degraded=False` forever. The container is running and
+  nothing is blocked, so the pod carries no problem to report — but once its
+  Deployment passes `progressDeadlineSeconds`, the environment now reports
+  `Degraded=True` with a `Stalled:` message naming the service. No elapsed-time
+  state of our own: Kubernetes already keeps that clock.
+
+- A Secret named in `secretRefs` or `imagePullSecrets` whose **type** changed
+  left the environment permanently `Failed`. The copy in the environment
+  namespace could not be updated — `Secret.type` is immutable — so every
+  reconcile failed with `field is immutable`, naming a Secret the user never
+  created. The copy is now replaced when the source's type changes.
 
 ### Changed
 

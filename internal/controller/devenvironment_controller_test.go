@@ -44,6 +44,8 @@ const (
 	envName  = "team-alpha"
 	envNS    = "default"
 	targetNS = "team-alpha"
+	// Shared by the storage specs below; goconst flags the repeated literal.
+	testMountPath = "/data"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -113,7 +115,7 @@ func TestReconcileAddsFinalizer(t *testing.T) {
 func TestReconcileProvisionsEnvironment(t *testing.T) {
 	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
 		e.Spec.Storage = &devenvv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}
-		e.Spec.Services[0].MountPath = "/data"
+		e.Spec.Services[0].MountPath = testMountPath
 	}))
 	reconcile(t, r)
 	ctx := context.Background()
@@ -143,7 +145,7 @@ func TestReconcileProvisionsEnvironment(t *testing.T) {
 	require.Len(t, container.EnvFrom, 1)
 	assert.Equal(t, envName+"-config", container.EnvFrom[0].ConfigMapRef.Name)
 	require.Len(t, container.VolumeMounts, 1)
-	assert.Equal(t, "/data", container.VolumeMounts[0].MountPath)
+	assert.Equal(t, testMountPath, container.VolumeMounts[0].MountPath)
 	require.Len(t, deploy.Spec.Template.Spec.Volumes, 1)
 	assert.Equal(t, envName+"-workspace", deploy.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName)
 
@@ -152,6 +154,115 @@ func TestReconcileProvisionsEnvironment(t *testing.T) {
 	assert.Equal(t, corev1.ServiceTypeClusterIP, svc.Spec.Type)
 	assert.Equal(t, int32(6379), svc.Spec.Ports[0].Port)
 	assert.Equal(t, map[string]string{labelEnvironment: envName, labelService: "redis"}, svc.Spec.Selector)
+}
+
+func TestReconcileSetsFSGroupOnlyOnServicesThatMountTheVolume(t *testing.T) {
+	// fsGroup on a pod with no volume changes nothing, and setting it
+	// everywhere would roll every service the first time anyone added the
+	// field (#47).
+	gid := int64(65534)
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Storage = &devenvv1alpha1.StorageSpec{
+			Size:    resource.MustParse("1Gi"),
+			FSGroup: &gid,
+		}
+		e.Spec.Services[0].MountPath = testMountPath
+		e.Spec.Services = append(e.Spec.Services, devenvv1alpha1.ServiceSpec{
+			Name: "api", Image: "api:1", Port: 8080,
+		})
+	}))
+	reconcile(t, r)
+	ctx := context.Background()
+
+	var mounts appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &mounts))
+	require.NotNil(t, mounts.Spec.Template.Spec.SecurityContext)
+	assert.Equal(t, &gid, mounts.Spec.Template.Spec.SecurityContext.FSGroup)
+
+	var doesNot appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "api", Namespace: targetNS}, &doesNot))
+	assert.Nil(t, doesNot.Spec.Template.Spec.SecurityContext,
+		"a service that mounts nothing should not get a pod securityContext")
+}
+
+func TestReconcileClearsFSGroupWhenStorageIsRemoved(t *testing.T) {
+	// Dropping storage from a spec is an ordinary edit and has to take effect.
+	// Skipping the clear for services that no longer mount left fsGroup on the
+	// pod template forever.
+	gid := int64(65534)
+	env := newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Storage = &devenvv1alpha1.StorageSpec{Size: resource.MustParse("1Gi"), FSGroup: &gid}
+		e.Spec.Services[0].MountPath = testMountPath
+	})
+	r, c := newReconciler(t, env)
+	reconcile(t, r)
+	ctx := context.Background()
+
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	require.NotNil(t, deploy.Spec.Template.Spec.SecurityContext)
+	require.Equal(t, &gid, deploy.Spec.Template.Spec.SecurityContext.FSGroup)
+
+	// The user removes storage entirely.
+	var live devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(ctx, request().NamespacedName, &live))
+	live.Spec.Storage = nil
+	live.Spec.Services[0].MountPath = ""
+	require.NoError(t, c.Update(ctx, &live))
+
+	reconcile(t, r)
+
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	if sc := deploy.Spec.Template.Spec.SecurityContext; sc != nil {
+		assert.Nil(t, sc.FSGroup, "fsGroup must go when the storage it belonged to does")
+	}
+	assert.Empty(t, deploy.Spec.Template.Spec.Volumes, "and so must the volume")
+}
+
+func TestReconcilePreservesAnInjectedSecurityContext(t *testing.T) {
+	// A mutating policy may put things in the pod securityContext. Assigning
+	// the struct wholesale stripped them on every reconcile; only the fsGroup
+	// field is ours to write.
+	gid := int64(65534)
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Storage = &devenvv1alpha1.StorageSpec{Size: resource.MustParse("1Gi"), FSGroup: &gid}
+		e.Spec.Services[0].MountPath = testMountPath
+	}))
+	reconcile(t, r)
+	ctx := context.Background()
+
+	// Stand in for the policy: add a field we do not manage, then reconcile.
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	nonRoot := true
+	deploy.Spec.Template.Spec.SecurityContext.RunAsNonRoot = &nonRoot
+	require.NoError(t, c.Update(ctx, &deploy))
+
+	reconcile(t, r)
+
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	sc := deploy.Spec.Template.Spec.SecurityContext
+	require.NotNil(t, sc)
+	assert.Equal(t, &gid, sc.FSGroup, "ours is still applied")
+	require.NotNil(t, sc.RunAsNonRoot, "theirs must survive the reconcile")
+	assert.True(t, *sc.RunAsNonRoot)
+}
+
+func TestReconcileLeavesSecurityContextUnsetWithoutFSGroup(t *testing.T) {
+	// Asserts nil, which holds here only because the fake client does no
+	// defaulting — a real API server stores `securityContext: {}`. The point
+	// of the assertion is that we set no fsGroup, not that the stored form is
+	// nil.
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.Storage = &devenvv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}
+		e.Spec.Services[0].MountPath = testMountPath
+	}))
+	reconcile(t, r)
+
+	var deploy appsv1.Deployment
+	require.NoError(t, c.Get(context.Background(),
+		types.NamespacedName{Name: "redis", Namespace: targetNS}, &deploy))
+	assert.Nil(t, deploy.Spec.Template.Spec.SecurityContext)
 }
 
 func TestReconcileSkipsPVCWhenNoStorageRequested(t *testing.T) {
@@ -356,6 +467,103 @@ func TestReferencedPullSecretsAreDedupedAndSorted(t *testing.T) {
 		})
 	})
 	assert.Equal(t, []string{"alpha", "mike", "zulu"}, referencedPullSecrets(env))
+}
+
+func TestReconcileRefusesToOverwriteAForeignSecretOfTheSameType(t *testing.T) {
+	// The commoner collision: a Secret someone else owns that happens to have
+	// the SAME type as the source. Checking ownership only on the type-mismatch
+	// path let this fall through to CreateOrUpdate, which overwrote the data
+	// and stamped it operator-managed — after which teardown deleted it.
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "creds",
+			Namespace: targetNS,
+			Labels:    map[string]string{"app": "something-else"},
+		},
+		Type: corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{".dockerconfigjson": []byte(`{"auths":{"theirs":{}}}`)},
+	}
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"creds"}
+	}), dockerCfg("creds"), foreign)
+	ctx := context.Background()
+
+	_, err := r.Reconcile(ctx, request())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not managed by this DevEnvironment")
+
+	var after corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "creds", Namespace: targetNS}, &after))
+	assert.Equal(t, []byte(`{"auths":{"theirs":{}}}`), after.Data[".dockerconfigjson"],
+		"their data must be untouched")
+	assert.Equal(t, "something-else", after.Labels["app"], "their labels must be untouched")
+	assert.NotEqual(t, managerName, after.Labels[labelManagedBy],
+		"must not be stamped operator-managed, or teardown would delete it")
+}
+
+func TestReconcileRefusesToReplaceASecretItDoesNotOwn(t *testing.T) {
+	// The environment namespace is somewhere developers deploy into, so a
+	// same-named Secret from cert-manager or a person is possible. Replacing
+	// the copy on a type change must never destroy one of those (#48).
+	foreign := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "creds",
+			Namespace: targetNS,
+			Labels:    map[string]string{"app": "something-else"},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{"tls.crt": []byte("theirs")},
+	}
+	r, c := newReconciler(t, newEnv(func(e *devenvv1alpha1.DevEnvironment) {
+		e.Spec.ImagePullSecrets = []string{"creds"}
+	}), dockerCfg("creds"), foreign)
+	ctx := context.Background()
+
+	_, err := r.Reconcile(ctx, request())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not managed by this DevEnvironment")
+
+	// Still there, untouched.
+	var after corev1.Secret
+	require.NoError(t, c.Get(ctx, types.NamespacedName{Name: "creds", Namespace: targetNS}, &after))
+	assert.Equal(t, corev1.SecretTypeTLS, after.Type)
+	assert.Equal(t, []byte("theirs"), after.Data["tls.crt"])
+}
+
+func TestReplaceOnTypeChangeReadsThroughTheAPIReader(t *testing.T) {
+	// In production Client reads through the manager's cache. Acting on a
+	// stale copy would delete a Secret that is already correct, so the check
+	// must go through reader(). Client and APIReader are seeded to disagree:
+	// only a reader()-based lookup sees the current type.
+	env := newEnv()
+	sch := testScheme(t)
+
+	// Labelled as a copy this environment made: ownership is checked before the
+	// type comparison, and a real copy always carries these.
+	ours := map[string]string{
+		labelManagedBy:      managerName,
+		labelEnvironment:    envName,
+		labelOwnerNamespace: envNS,
+	}
+	stale := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: targetNS, Labels: ours},
+		Type:       corev1.SecretTypeOpaque,
+	}
+	current := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: targetNS, Labels: ours},
+		Type:       corev1.SecretTypeDockerConfigJson,
+	}
+	r := &DevEnvironmentReconciler{
+		Client:    fake.NewClientBuilder().WithScheme(sch).WithObjects(stale).Build(),
+		Scheme:    sch,
+		APIReader: fake.NewClientBuilder().WithScheme(sch).WithObjects(current).Build(),
+	}
+
+	replaced, err := r.replaceOnTypeChange(
+		context.Background(), env, "creds", targetNS, corev1.SecretTypeDockerConfigJson,
+	)
+	require.NoError(t, err)
+	assert.False(t, replaced, "should not replace: the API says the copy is already the right type")
 }
 
 func TestReconcileRefusesToAdoptUnmanagedNamespace(t *testing.T) {
@@ -722,6 +930,175 @@ func TestReconcileReportsImagePullAndSchedulingFailures(t *testing.T) {
 		assert.Equal(t, metav1.ConditionTrue, d.Status)
 		assert.Contains(t, d.Message, "Unschedulable: 0/3 nodes are available: insufficient cpu")
 	})
+}
+
+// stalledDeployment is a Deployment the controller has given up progressing:
+// the shape Kubernetes produces when no replica becomes ready in time. Named
+// for newEnv's only service, which these fixtures pair with.
+func stalledDeployment() *appsv1.Deployment {
+	const svc = "redis"
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       svc,
+			Namespace:  targetNS,
+			Generation: 1,
+			Labels: map[string]string{
+				labelManagedBy:   managerName,
+				labelEnvironment: envName,
+				labelService:     svc,
+			},
+		},
+		Status: appsv1.DeploymentStatus{
+			// Status has caught up with spec, and a pod from the current
+			// template exists: both gates in progressDeadlineExceeded.
+			ObservedGeneration: 1,
+			UpdatedReplicas:    1,
+			Conditions: []appsv1.DeploymentCondition{{
+				Type:    appsv1.DeploymentProgressing,
+				Status:  corev1.ConditionFalse,
+				Reason:  "ProgressDeadlineExceeded",
+				Message: `ReplicaSet "redis-abc" has timed out progressing.`,
+			}},
+		},
+	}
+}
+
+// runningNotReadyPod is the case #15 describes: nothing is wrong with the
+// container, it just never answers its probe. No waiting reason, so the pod
+// pass finds nothing to report.
+func runningNotReadyPod() *corev1.Pod {
+	const svc = "redis"
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      svc + "-pod",
+			Namespace: targetNS,
+			Labels: map[string]string{
+				labelManagedBy:   managerName,
+				labelEnvironment: envName,
+				labelService:     svc,
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  svc,
+				Ready: false,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+}
+
+func TestReconcileReportsAServiceThatNeverBecomesReady(t *testing.T) {
+	r, c := newReconciler(t, newEnv(),
+		runningNotReadyPod(),
+		stalledDeployment(),
+	)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+
+	assert.True(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded),
+		"a service stuck not-ready past the progress deadline should be degraded")
+	cond := meta.FindStatusCondition(env.Status.Conditions, devenvv1alpha1.ConditionDegraded)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message, `service "redis"`)
+	assert.Contains(t, cond.Message, "readinessProbe")
+}
+
+func TestReconcileIgnoresAStaleDeadlineFromThePreviousRollout(t *testing.T) {
+	// The user has just fixed the probe, so spec moved and the Deployment
+	// controller has not caught up. Its conditions still describe the rollout
+	// that failed; reporting them would fire Degraded in the very reconcile
+	// that applies the fix.
+	stale := stalledDeployment()
+	stale.Generation = 2
+	stale.Status.ObservedGeneration = 1
+
+	r, c := newReconciler(t, newEnv(), runningNotReadyPod(), stale)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+	assert.False(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded),
+		"a stale condition from the previous rollout must not report as current")
+}
+
+func TestReconcileIgnoresADeadlineBeforeTheNewTemplateHasAPod(t *testing.T) {
+	// Spec has been fixed and status has caught up, but no pod from the new
+	// template exists yet — so the carried-over condition cannot be describing
+	// this rollout.
+	early := stalledDeployment()
+	early.Status.UpdatedReplicas = 0
+
+	r, c := newReconciler(t, newEnv(), runningNotReadyPod(), early)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+	assert.False(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded))
+}
+
+func TestStalledReportsReplicaFailureRatherThanGuessingAtTheProbe(t *testing.T) {
+	// A ReplicaSet that cannot create pods at all trips the same deadline with
+	// no pod to inspect. Claiming a readinessProbe problem there would bury
+	// the real reason.
+	blocked := stalledDeployment()
+	// Zero, because that is the whole problem: the ReplicaSet cannot create a
+	// pod. The previous fixture said 1, a state this failure cannot reach, and
+	// so passed while the real case was suppressed.
+	blocked.Status.UpdatedReplicas = 0
+	blocked.Status.Conditions = append(blocked.Status.Conditions, appsv1.DeploymentCondition{
+		Type:    appsv1.DeploymentReplicaFailure,
+		Status:  corev1.ConditionTrue,
+		Reason:  "FailedCreate",
+		Message: `pods "redis-" is forbidden: exceeded quota: dev-quota`,
+	})
+
+	r, c := newReconciler(t, newEnv(), blocked)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+	cond := meta.FindStatusCondition(env.Status.Conditions, devenvv1alpha1.ConditionDegraded)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message, "exceeded quota")
+	assert.NotContains(t, cond.Message, "readinessProbe")
+}
+
+func TestReconcileDoesNotReportAServiceStillWithinItsDeadline(t *testing.T) {
+	// The same not-ready pod, but the Deployment has not given up. This is an
+	// ordinary slow start and must not read as degraded.
+	progressing := stalledDeployment()
+	progressing.Status.Conditions[0].Status = corev1.ConditionTrue
+	progressing.Status.Conditions[0].Reason = "ReplicaSetUpdated"
+
+	r, c := newReconciler(t, newEnv(), runningNotReadyPod(), progressing)
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+	assert.False(t, meta.IsStatusConditionTrue(env.Status.Conditions, devenvv1alpha1.ConditionDegraded))
+}
+
+func TestStalledDeploymentDoesNotMaskAContainerProblem(t *testing.T) {
+	// A crash loop trips the progress deadline too. "It crashed" explains more
+	// than "it timed out", so the pod problem must win.
+	crashing := runningNotReadyPod()
+	crashing.Status.ContainerStatuses[0].State = corev1.ContainerState{
+		Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off 5m0s"},
+	}
+
+	r, c := newReconciler(t, newEnv(), crashing, stalledDeployment())
+	reconcile(t, r)
+
+	var env devenvv1alpha1.DevEnvironment
+	require.NoError(t, c.Get(context.Background(), request().NamespacedName, &env))
+	cond := meta.FindStatusCondition(env.Status.Conditions, devenvv1alpha1.ConditionDegraded)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message, "CrashLoopBackOff")
+	assert.NotContains(t, cond.Message, "Stalled")
 }
 
 // A terminating pod is on its way out by design — reporting it would make every

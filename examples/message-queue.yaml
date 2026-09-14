@@ -1,0 +1,51 @@
+# RabbitMQ and Redis — for developing producers and workers without running a
+# broker on your laptop.
+#
+#   kubectl apply -f examples/message-queue.yaml
+#   rabbitmq.<namespace>.svc.cluster.local:5672     # AMQP
+#   redis.<namespace>.svc.cluster.local:6379
+#
+# A service exposes ONE port. RabbitMQ's management UI is on 15672, which this
+# does not publish — the environment exists to be produced to and consumed
+# from. To reach the UI anyway, port-forward the pod rather than the service:
+#
+#   kubectl -n message-queue port-forward deploy/rabbitmq 15672:15672
+apiVersion: devenv.aviture.dev/v1alpha1
+kind: DevEnvironment
+metadata:
+  name: message-queue
+  namespace: default
+spec:
+  owner: platform-team
+
+  # No storage. Queues here are for development traffic; losing them on a
+  # restart is not worth a volume. Add a `storage` block and mount
+  # /var/lib/rabbitmq if you need them to survive.
+
+  config:
+    LOG_LEVEL: debug
+    ENVIRONMENT: development
+
+  services:
+    - name: rabbitmq
+      image: rabbitmq:3-alpine
+      port: 5672
+      env:
+        RABBITMQ_DEFAULT_USER: dev
+        RABBITMQ_DEFAULT_PASS: dev
+        RABBITMQ_DEFAULT_VHOST: /
+      # RabbitMQ boots the Erlang VM before it binds 5672 — several seconds
+      # even on a warm image. The probe holds the environment out of Ready
+      # until the port actually answers.
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 200m, memory: 256Mi }
+        limits: { cpu: 1, memory: 768Mi }
+
+    - name: redis
+      image: redis:7-alpine
+      port: 6379
+      readinessProbe: {}
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: 200m, memory: 256Mi }

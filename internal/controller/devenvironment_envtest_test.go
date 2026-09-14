@@ -18,6 +18,9 @@ package controller
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -28,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -153,6 +157,13 @@ var _ = Describe("DevEnvironment", func() {
 		Entry("a leading slash", "/ghcr.io"),
 		Entry("a space", "ghcr.io /myorg"),
 		Entry("an empty path segment", "ghcr.io//myorg"),
+		// The pattern once bounded the port to five digits, which let these
+		// through to fail at pull time instead (#21).
+		Entry("port zero", "registry.internal:0"),
+		Entry("a port above the range", "registry.internal:65536"),
+		Entry("a five-digit port above the range", "ghcr.io:99999"),
+		Entry("a zero-padded port", "registry.internal:0080"),
+		Entry("an empty port", "registry.internal:"),
 	)
 
 	DescribeTable("accepts a well-formed registry",
@@ -167,6 +178,8 @@ var _ = Describe("DevEnvironment", func() {
 		Entry("a host, port and path", "registry.internal:5000/mirror"),
 		Entry("localhost with a port", "localhost:5000"),
 		Entry("a deep path", "ghcr.io/myorg/team/sub"),
+		Entry("the lowest valid port", "registry.internal:1"),
+		Entry("the highest valid port", "registry.internal:65535"),
 	)
 
 	// Unstructured on purpose. An explicit empty string is how a templating
@@ -190,6 +203,97 @@ var _ = Describe("DevEnvironment", func() {
 			},
 		}}
 		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+	})
+
+	// examples/ ships manifests people copy. A field renamed or tightened in
+	// the API would leave them silently invalid — discovered by whoever applied
+	// one, not by us. Server-side dry-run validates each against the real CRD
+	// schema without creating anything, so this stays cheap and needs no
+	// cleanup.
+	It("accepts every manifest in examples/", func() {
+		dir := filepath.Join("..", "..", "examples")
+		entries, err := os.ReadDir(dir)
+		Expect(err).NotTo(HaveOccurred(), "examples/ should exist")
+
+		checked := 0
+		for _, e := range entries {
+			if e.IsDir() || (!strings.HasSuffix(e.Name(), ".yaml") && !strings.HasSuffix(e.Name(), ".yml")) {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			Expect(err).NotTo(HaveOccurred(), e.Name())
+
+			obj := &unstructured.Unstructured{}
+			Expect(yaml.Unmarshal(raw, &obj.Object)).To(Succeed(), e.Name())
+
+			// Unique name per run: dry-run still rejects a duplicate, and the
+			// point is the schema, not the name in the file.
+			obj.SetName(uniqueName())
+			obj.SetNamespace("default")
+			// namespaceName is immutable and defaults to the resource name;
+			// leaving the file's value would collide across runs.
+			unstructured.RemoveNestedField(obj.Object, "spec", "namespaceName")
+
+			// Strict matters more than the dry-run does. The server defaults to
+			// Warn, which PRUNES an unknown field and returns success — so a
+			// field renamed in the API would leave this green while a user's
+			// `kubectl apply` (strict since 1.25) failed on it. Strict is what
+			// makes this catch the rot it exists to catch.
+			Expect(k8sClient.Create(ctx, obj, client.DryRunAll, client.FieldValidation("Strict"))).
+				To(Succeed(), "examples/%s is not valid against the CRD", e.Name())
+			checked++
+		}
+		// Guards against the loop checking NOTHING — a moved directory, a
+		// changed suffix, a broken glob. Deliberately 1, not the current file
+		// count: a floor equal to the number of examples turns deleting one
+		// into a CI failure that reports a broken glob, which is not what
+		// happened. Counting files cannot detect a deliberate deletion anyway.
+		Expect(checked).To(BeNumerically(">=", 1), "the loop validated no example manifests at all")
+	})
+
+	// Against the real API server, not the fake client: Secret.type immutability
+	// is enforced by the API server, and the fake client happily rewrites it —
+	// so a unit test here would pass whether or not the bug existed (#48).
+	It("replaces a copied Secret when the source's type changes", func() {
+		name := uniqueName()
+		env := newResource(name)
+		env.Spec.Services[0].SecretRefs = []string{"creds"}
+		Expect(k8sClient.Create(ctx, env)).To(Succeed())
+
+		src := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "default"},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"PASSWORD": []byte("hunter2")},
+		}
+		Expect(k8sClient.Create(ctx, src)).To(Succeed())
+
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+
+		r := &DevEnvironmentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), APIReader: k8sClient}
+		Expect(r.reconcileSecrets(ctx, env, name)).To(Succeed())
+
+		var copied corev1.Secret
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "creds", Namespace: name}, &copied)).To(Succeed())
+		Expect(copied.Type).To(Equal(corev1.SecretTypeOpaque))
+
+		// Repurpose the source as a registry credential — the sequence the
+		// imagePullSecrets type check pushes people into.
+		Expect(k8sClient.Delete(ctx, src)).To(Succeed())
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "default"},
+			Type:       corev1.SecretTypeDockerConfigJson,
+			Data:       map[string][]byte{".dockerconfigjson": []byte(`{"auths":{}}`)},
+		})).To(Succeed())
+
+		// Without the replace this fails with `type: field is immutable`, and
+		// keeps failing on every reconcile thereafter.
+		Expect(r.reconcileSecrets(ctx, env, name)).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "creds", Namespace: name}, &copied)).To(Succeed())
+		Expect(copied.Type).To(Equal(corev1.SecretTypeDockerConfigJson))
+		Expect(copied.Data).To(HaveKey(".dockerconfigjson"))
+		Expect(copied.Data).NotTo(HaveKey("PASSWORD"), "stale data from the old copy")
 	})
 
 	It("provisions a namespace, deployment and service", func() {

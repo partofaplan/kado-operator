@@ -38,7 +38,10 @@ spec:
 ```
 
 A fuller example lives in
-[`config/samples/devenv_v1alpha1_devenvironment.yaml`](../config/samples/devenv_v1alpha1_devenvironment.yaml).
+[`config/samples/devenv_v1alpha1_devenvironment.yaml`](../config/samples/devenv_v1alpha1_devenvironment.yaml),
+and [`examples/`](../examples/) has ready-to-apply suites for common setups —
+Postgres or MySQL with a database UI, MongoDB, RabbitMQ, Prometheus and
+Grafana, and a mail sandbox.
 
 ## What gets created
 
@@ -90,6 +93,7 @@ what it is allowed to delete.
 | `size` | Quantity | *required* | Requested capacity, e.g. `1Gi`. |
 | `storageClassName` | string | cluster default | StorageClass backing the claim. |
 | `accessModes` | []string | `[ReadWriteOnce]` | Access modes for the claim. |
+| `fsGroup` | int64 | — | Makes the volume group-owned by this GID so a non-root image can write to it. See [Non-root images and storage](#non-root-images-and-storage). |
 
 The claim is created once and then left alone: PVC specs are largely immutable,
 so resizing is a deliberate manual operation rather than something a spec edit
@@ -174,6 +178,13 @@ CRD rejects those at apply time rather than letting `https://ghcr.io/redis:7`
 fail later at pull time. An explicit empty string means "unset", so a templated
 `registry: {{ .Values.registry }}` with no value behaves as if the field were
 absent.
+
+A port, if given, must be a real TCP port — between 1 and 65535. The CRD
+rejects `:0` and `:99999` at apply time for the same reason it rejects a
+scheme: neither could ever pull, and failing on `kubectl apply` beats failing
+later in `ImagePullBackOff`. Only the canonical spelling is accepted, so a
+zero-padded `:0080` is rejected too, even though Docker's grammar allows it —
+write `:80`.
 
 An IPv6 literal such as `[::1]:5000` cannot be used in `registry`. It works
 inside `image`, where it is recognised as a host, so pin the full reference on
@@ -268,6 +279,61 @@ Kubernetes itself accepts a wrong-typed Secret here and then silently ignores
 it, so the only symptom would otherwise be an `ImagePullBackOff` that looks
 exactly like a bad password.
 
+## Non-root images and storage
+
+A container that does not run as root cannot write the shared volume unless you
+say which group owns it:
+
+```yaml
+spec:
+  storage:
+    size: 2Gi
+    fsGroup: 65534          # the GID the image runs as
+  services:
+    - name: prometheus
+      image: prom/prometheus:v3.1.0
+      port: 9090
+      mountPath: /prometheus
+```
+
+Kubernetes then chowns the volume to `root:<fsGroup>`, sets the group-write and
+setgid bits, and adds the GID to the container's supplementary groups. Measured
+inside the container on a k3s cluster, with and without the field:
+
+| | pod `securityContext` | volume |
+| --- | --- | --- |
+| `fsGroup: 65534` | `{"fsGroup":65534}` | `owner=0 group=65534 mode=2777` |
+| unset | none | `owner=0 group=0 mode=777` |
+
+The `group` column is the part that matters. The `777` on the unset row is k3s
+`local-path` being permissive — that is why a non-root image appears to work
+there. A provisioner that presents `root:root 0755` gives the same `group=0`
+with no group write, and the container cannot write at all.
+
+Without it the volume is presented as the provisioner leaves it. That is
+`root:root 0755` on most CSI drivers, EBS and GCE PD, and a non-root process
+gets `permission denied` — Prometheus, for instance, panics at startup with
+`Unable to create mmap-ed active query log`, and the environment sits in
+`Provisioning` while the pod crash-loops.
+
+**Images that start as root and chown their own data directory do not need
+this** — `postgres`, `mysql` and `mongo` all do. Images that run as a fixed
+non-root user do: Prometheus is `nobody` (65534), Grafana is uid 472.
+
+The field applies only to services that actually mount the volume, so adding it
+does not restart anything else. It does roll the service that mounts it, and on
+a cluster whose CSI driver enforces single-node attachment that is the one
+rollout which can deadlock — the replacement pod wants the ReadWriteOnce claim
+while the old pod still holds it, and neither gives way
+([#51](https://github.com/partofaplan/kado-operator/issues/51)). There, delete
+and recreate the environment rather than editing `fsGroup` in place. `fsGroup` is a pod-level setting and the shared
+volume is meant to be mounted by one service, so it lives on `storage` rather
+than per service.
+
+**Why this is easy to miss:** a cluster whose StorageClass mounts the volume
+0777 — k3s `local-path`, which both k3d and Rancher Desktop use by default —
+works without it. The failure appears on the second cluster, not the first.
+
 ## Readiness
 
 Without a probe, `readyServices` counts containers Kubernetes *started*, not
@@ -331,6 +397,7 @@ kubectl describe devenvironment team-alpha
 | `Degraded=True`, "reading source secret" | A name in `secretRefs` or `imagePullSecrets` does not exist in the `DevEnvironment`'s own namespace. |
 | `Degraded=True`, "named in imagePullSecrets but has type" | The Secret exists but is not a docker-registry Secret. Recreate it with `kubectl create secret docker-registry`. |
 | `Degraded=True`, reason `WorkloadUnhealthy` | A container cannot start. The message names the service, the blocking reason (`CrashLoopBackOff`, `ImagePullBackOff`, `Unschedulable`, …), the last exit code and the `kubectl logs` command that shows why. A missing required env var — `POSTGRES_PASSWORD`, say — lands here. |
-| Stuck at `Provisioning` with `Degraded=False` | Pods are running but not ready. Nothing is *blocked*, so this is not degraded: check image pull times, whether a PVC is waiting for a consumer (a volume no service mounts stays `Pending` forever), and whether a `readinessProbe` is pointed at a port nothing serves. A probe that never passes will sit here indefinitely — `kubectl describe pod -n <env>` shows the failing probe. |
+| Stuck at `Provisioning` with `Degraded=False` | Pods are running but not ready, and nothing is *blocked* — so this is not degraded yet. Check image pull times and whether a PVC is waiting for a consumer (a volume no service mounts stays `Pending` forever). A service that never becomes ready does not stay silent: once its Deployment passes `progressDeadlineSeconds` (10 minutes by default) it is reported as `Degraded=True`, reason `WorkloadUnhealthy`, message `service "<name>": Stalled: ...` (#15). A service that *was* ready and later stopped passing its probe is not covered: Kubernetes only times out a rollout that never completed, so that case is still silent ([#59](https://github.com/partofaplan/kado-operator/issues/59)). |
+| `Degraded=True`, message contains `Stalled:` | The container is running but has never passed its `readinessProbe` within the Deployment's progress deadline. Usually the probe is pointed at a port nothing serves — `readinessProbe: {}` targets the service's own `port`, so an explicit handler naming a different one is the common cause. `kubectl describe pod -n <env>` shows the failing probe. |
 | Stuck deleting | The namespace is still terminating, usually a finalizer on something inside it. `kubectl get ns <env> -o yaml`. |
 | `helm install` rejects the CRD as not Helm-owned | The CRD was installed by `make install` (kustomize). See [CRD ownership](development.md#crd-ownership-make-install-vs-the-chart). |

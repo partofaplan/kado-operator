@@ -40,6 +40,41 @@ other than its author. Five gates, in order, no exceptions:
    published image onto the live `picard` cluster and proves it provisions a
    test `DevEnvironment` to Ready and tears it down again.
 
+### What GitHub actually enforces
+
+The five gates are the process. They are not all mechanisms, and it matters
+which is which — reading the list above, it would be reasonable to assume a
+merge without approval is impossible. It is not.
+
+| Gate | Enforced by | Actually blocks a merge? |
+| --- | --- | --- |
+| 1 Branch | convention | no |
+| 2 Done | branch protection: `Lint`, `Unit & envtest`, `Generated code is up to date`, `Image builds` | **yes** |
+| 3 Review | convention | **no** |
+| 4 Merge on approval | — | **no** |
+| 5 Validate | runs after the merge | n/a — it cannot block one |
+
+`required_approving_review_count` is **0** on both `develop` and `main`, so
+anyone with write access can merge the moment CI is green. Gate 3 is honoured
+because the loop honours it, not because GitHub checks.
+
+**Setting the count to 1 on its own would deadlock this, rather than fix it.**
+The reviewing agent posts nothing to GitHub — its verdict lives in the session
+that ran it — and GitHub does not let an author approve their own pull request.
+`can_approve_pull_request_reviews` is `false` at the repository level and
+`default_workflow_permissions` is `read`, so the built-in `GITHUB_TOKEN` cannot
+stand in either.
+
+Closing it takes a **second identity** — a bot account with a PAT, or a GitHub
+App installation — for the reviewing agent to post a real `gh pr review
+--approve` under. Only once that exists is raising the count safe. Tracked in
+[#16](https://github.com/partofaplan/kado-operator/issues/16).
+
+Two things that are true today and worth not mistaking for enforcement: CI
+being green means gates 1 and 2 passed, and nothing else; and `enforce_admins`
+is on, so the required *status checks* genuinely cannot be bypassed, including
+by the repository owner.
+
 **Nothing before the merge touches a cluster.** A feature branch must not
 create a cluster, apply a CRD, or deploy the operator anywhere — not to
 `picard`, not to your own cluster as a gate, and not to a throwaway cluster
@@ -310,14 +345,29 @@ helm upgrade --install kado-operator ./charts/kado-operator \
 kubectl -n kado-operator-system logs -f deploy/kado-operator
 ```
 
+The `image.tag` and `image.pullPolicy` values there are load-bearing. `pullPolicy=Never` because a
+side-loaded image must never be fetched — **side-loading always needs it**, and
+with the default `IMAGE_TAG=latest` it is required, since the chart would
+otherwise pull the registry's `latest` straight over the image you just built.
+A tag of your own, like `dev`, keeps the local image out of the way of anything
+published.
+
+Left unset, the chart derives the policy from the tag the way Kubernetes does
+for a bare pod spec — `Always` for the literal `latest`, `IfNotPresent`
+otherwise (#18). That is what stops a node holding an older `latest` from
+quietly keeping it while `helm upgrade` reports success. It is Kubernetes' rule,
+not a moving-tag detector: nothing in a reference says whether a tag moves, so
+any *other* moving tag needs the policy stated outright.
+
 On a remote cluster there is nothing to side-load — push the image and let the
-cluster pull it:
+cluster pull it. `dev` moves every push, so say so:
 
 ```bash
 make docker-push IMAGE_TAG=dev
 helm upgrade --install kado-operator ./charts/kado-operator \
   --namespace kado-operator-system --create-namespace \
-  --set image.tag=dev
+  --set image.tag=dev \
+  --set image.pullPolicy=Always
 ```
 
 ### Deploying from CI

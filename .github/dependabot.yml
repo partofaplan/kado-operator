@@ -8,6 +8,28 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # Routine bumps batch into one PR; majors do not (#41).
+      #
+      # Grouping is not the problem and removing it is not the fix. This group
+      # previously matched every update type, so its first run put 11 bumps
+      # across 8 majors into a single PR. All of them moved node20 to node24,
+      # which needs Actions Runner >= 2.327.1 and would have broken the
+      # self-hosted job on an older one — and nothing in that PR said so.
+      #
+      # An action's major can change its inputs, outputs or runtime with no
+      # code change of ours, and batched like that the reviewable unit is
+      # all-or-nothing while a red pipeline has eleven suspects. An update that
+      # does not match a group is not dropped: Dependabot raises it on its own,
+      # so each major becomes a small diff that can be read, and reverted, by
+      # itself.
+      #
+      # They arrive a few at a time. open-pull-requests-limit defaults to 5 and
+      # counts this grouped PR too, so a wave of majors queues rather than
+      # landing at once — pacing, not suppression; the rest follow as slots
+      # free up.
       actions:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
